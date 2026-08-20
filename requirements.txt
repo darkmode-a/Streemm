@@ -1,5 +1,3 @@
 pyTelegramBotAPI
 telethon
 cryptg
-flask
-gunicorn

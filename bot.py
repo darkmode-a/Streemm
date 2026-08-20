@@ -281,7 +281,7 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# ========== STREAM SYSTEM (FINAL) ==========
+# ========== STREAM SYSTEM (SSRC RETRY FIX) ==========
 
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
@@ -328,28 +328,41 @@ def handle_stream(m):
                     username = link.split("/")[-1].split("?")[0].replace("@", "")
                     entity = await client.get_entity(username)
                     
-                    # Channel join (zaroori)
+                    # Channel join
                     try:
                         await client(JoinChannelRequest(entity))
                         await asyncio.sleep(2)
                     except:
                         pass
                     
-                    # Get full channel - sahi call object ke liye
+                    # Get full channel
                     full_channel = await client(tl_functions.channels.GetFullChannelRequest(entity))
                     
                     if full_channel and full_channel.full_chat and full_channel.full_chat.call:
                         call_obj = full_channel.full_chat.call
                         
-                        # VC JOIN - data string ke saath
-                        await client(tl_functions.phone.JoinGroupCallRequest(
-                            call=call_obj,
-                            params=DataJSON(data="{}"),
-                            muted=False,
-                            join_as=me
-                        ))
+                        # SSRC RETRY - 3 baar try
+                        for retry in range(3):
+                            try:
+                                await client(tl_functions.phone.JoinGroupCallRequest(
+                                    call=call_obj,
+                                    params=DataJSON(data="{}"),
+                                    muted=False,
+                                    join_as=me
+                                ))
+                                await client.disconnect()
+                                return True
+                            except Exception as e:
+                                error_str = str(e)
+                                if "SSRC" in error_str.upper() or "RETRY" in error_str.upper():
+                                    logger.warning(f"SSRC retry {retry+1}/3 for {acc['phone']}")
+                                    await asyncio.sleep(3)
+                                    continue
+                                else:
+                                    raise e
+                        
                         await client.disconnect()
-                        return True
+                        return False
                     else:
                         logger.warning(f"No active call for {username}")
                         await client.disconnect()

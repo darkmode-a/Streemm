@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import time
+import re
 from datetime import datetime
 from telebot import TeleBot, types
 from telethon import TelegramClient
@@ -112,7 +113,7 @@ def cmd_start(message):
 1️⃣ Click <b>Add Number</b>
 2️⃣ Send phone number (+91XXXXXXXXXX)
 3️⃣ OTP will be sent to that number
-4️⃣ Enter OTP - account gets stored
+4️⃣ Enter OTP (e.g. <code>mrking\"83838\"</code>)
 5️⃣ Click <b>Stream</b> and send VC link
 6️⃣ All accounts will join the stream
 
@@ -135,8 +136,7 @@ def cmd_help(message):
 • Click button
 • Send phone number with country code
 • Example: <code>+919876543210</code>
-• OTP will arrive on that number
-• Enter OTP to complete login
+• Send OTP code with format: <code>mrking\"83838\"</code>
 
 <b>📡 Stream:</b>
 • Click button
@@ -179,7 +179,7 @@ def handle_number(m):
     db["pending"][str(user_id)] = {"phone": clean}
     save_db()
     
-    status_msg = bot.reply_to(m, "⏳ <b>Sending OTP...</b>")
+    status_msg = bot.reply_to(m, "⏳ <b>Connecting to Telegram & requesting OTP...</b>")
     
     def send_otp():
         try:
@@ -198,8 +198,18 @@ def handle_number(m):
                 "timestamp": time.time()
             }
             
+            professional_msg = (
+                f"🔐 <b>SECURE OTP VERIFICATION</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 <b>Target Number:</b> <code>+{clean}</code>\n"
+                f"⏳ <b>Validity:</b> 5 Minutes\n\n"
+                f"📥 <b>Please send your OTP in this professional format:</b>\n"
+                f"👉 <code>mrking\"83838\"</code>\n\n"
+                f"<i>(Bot will automatically extract your code safely)</i>"
+            )
+            
             bot.edit_message_text(
-                f"✅ <b>OTP sent to {clean}!</b>\n\n⚠️ <b>OTP 5 minute tak valid hai!</b>\n\nPlease enter the OTP code:",
+                professional_msg,
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_otp_keyboard()
@@ -261,8 +271,16 @@ def cb_resend_otp(call):
             client_data["timestamp"] = time.time()
             active_clients[str(user_id)] = client_data
             
+            professional_msg = (
+                f"🔄 <b>NEW OTP SENT SUCCESSFULLY</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📱 <b>Target Number:</b> <code>+{phone}</code>\n\n"
+                f"📥 <b>Please send your OTP in format:</b>\n"
+                f"👉 <code>mrking\"83838\"</code>"
+            )
+            
             bot.edit_message_text(
-                f"✅ <b>New OTP sent!</b>\n\nPlease enter the OTP:",
+                professional_msg,
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_otp_keyboard()
@@ -282,7 +300,16 @@ def cb_resend_otp(call):
 @bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_otp")
 def handle_otp(m):
     user_id = m.from_user.id
-    otp = m.text.strip()
+    raw_text = m.text.strip()
+    
+    # 🔍 Smart Extraction: Extracting only numbers (digits) from watermark text (e.g. mrking"83838")
+    digits_found = re.findall(r'\d+', raw_text)
+    
+    if not digits_found:
+        bot.reply_to(m, "❌ <b>Invalid format!</b>\n\nKripya sahi format me bhejein, jaise:\n<code>mrking\"83838\"</code>", reply_markup=get_otp_keyboard())
+        return
+    
+    otp = "".join(digits_found)
     
     client_data = active_clients.get(str(user_id))
     if not client_data:
@@ -291,7 +318,7 @@ def handle_otp(m):
         save_db()
         return
     
-    status_msg = bot.reply_to(m, "⏳ <b>Verifying OTP...</b>")
+    status_msg = bot.reply_to(m, f"⏳ <b>Verifying OTP Code: <code>{otp}</code>...</b>")
     
     def verify_otp():
         try:
@@ -312,7 +339,7 @@ def handle_otp(m):
                         db["states"][str(user_id)] = "awaiting_2fa"
                         save_db()
                         bot.edit_message_text(
-                            "🔐 <b>2FA Password Required!</b>\n\nTelegram password enter karo:",
+                            "🔐 <b>2FA Password Required!</b>\n\nEnter your Telegram cloud password:",
                             chat_id=user_id,
                             message_id=status_msg.message_id,
                             reply_markup=get_cancel()
@@ -320,7 +347,7 @@ def handle_otp(m):
                         return
                     elif "EXPIRED" in error_str.upper() or "PHONE_CODE_EXPIRED" in error_str.upper():
                         bot.edit_message_text(
-                            "❌ <b>OTP expire ho gaya ya galat hai!</b>\n\nResend OTP button dabao.",
+                            "❌ <b>OTP expired or incorrect!</b>\n\nPlease click Resend OTP.",
                             chat_id=user_id,
                             message_id=status_msg.message_id,
                             reply_markup=get_otp_keyboard()
@@ -352,8 +379,16 @@ def handle_otp(m):
                 
                 total = len(db["accounts"][str(user_id)])
                 
+                success_text = (
+                    f"🎉 <b>ACCOUNT ADDED SUCCESSFULLY!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📱 <b>Phone:</b> <code>+{phone}</code>\n"
+                    f"👤 <b>Name:</b> {me.first_name}\n"
+                    f"📊 <b>Total Accounts:</b> {total}"
+                )
+                
                 bot.edit_message_text(
-                    f"🎉 <b>Account Added!</b>\n\n📱 {phone}\n👤 {me.first_name}\n📊 Total: {total}",
+                    success_text,
                     chat_id=user_id,
                     message_id=status_msg.message_id,
                     reply_markup=get_main_menu()
@@ -365,7 +400,7 @@ def handle_otp(m):
             logger.error(f"Verify error: {e}")
             active_clients.pop(str(user_id), None)
             bot.edit_message_text(
-                f"❌ <b>Failed:</b>\n<code>{str(e)}</code>",
+                f"❌ <b>Verification Failed:</b>\n<code>{str(e)}</code>",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_otp_keyboard()
@@ -383,7 +418,7 @@ def handle_2fa(m):
         bot.reply_to(m, "❌ <b>Session expired.</b>", reply_markup=get_main_menu())
         return
     
-    status_msg = bot.reply_to(m, "⏳ <b>Verifying Password...</b>")
+    status_msg = bot.reply_to(m, "⏳ <b>Verifying 2FA Password...</b>")
     
     def verify_2fa():
         try:
@@ -416,7 +451,7 @@ def handle_2fa(m):
                 total = len(db["accounts"][str(user_id)])
                 
                 bot.edit_message_text(
-                    f"🎉 <b>Account Added!</b>\n\n📱 {phone}\n👤 {me.first_name}\n📊 Total: {total}",
+                    f"🎉 <b>Account Added with 2FA!</b>\n\n📱 +{phone}\n👤 {me.first_name}\n📊 Total: {total}",
                     chat_id=user_id,
                     message_id=status_msg.message_id,
                     reply_markup=get_main_menu()
@@ -428,7 +463,7 @@ def handle_2fa(m):
             logger.error(f"2FA error: {e}")
             active_clients.pop(str(user_id), None)
             bot.edit_message_text(
-                f"❌ <b>Failed:</b>\n<code>{str(e)}</code>",
+                f"❌ <b>2FA Failed:</b>\n<code>{str(e)}</code>",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_cancel()
@@ -452,7 +487,7 @@ def cb_stream(call):
     save_db()
     
     bot.edit_message_text(
-        f"📡 <b>Send VC Link:</b>\n\nAccounts: <b>{len(accounts)}</b>",
+        f"📡 <b>Send VC Link:</b>\n\nAccounts Ready: <b>{len(accounts)}</b>",
         chat_id=call.from_user.id,
         message_id=call.message.message_id,
         reply_markup=get_cancel()
@@ -469,7 +504,7 @@ def handle_stream(m):
     
     accounts = db["accounts"].get(str(user_id), [])
     
-    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts...</b>", reply_markup=get_main_menu())
+    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts to stream...</b>", reply_markup=get_main_menu())
     
     def join_stream():
         success = 0
@@ -501,7 +536,7 @@ def handle_stream(m):
                 
                 try:
                     bot.edit_message_text(
-                        f"🚀 <b>Joining...</b>\n\n✅ {i}/{len(accounts)}",
+                        f"🚀 <b>Joining Stream...</b>\n\n✅ Connected: {i}/{len(accounts)}",
                         chat_id=user_id,
                         message_id=status_msg.message_id
                     )
@@ -514,7 +549,7 @@ def handle_stream(m):
             time.sleep(2)
         
         bot.edit_message_text(
-            f"✅ <b>Done!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
+            f"✅ <b>Stream Joining Completed!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
             chat_id=user_id,
             message_id=status_msg.message_id,
             reply_markup=get_main_menu()
@@ -533,15 +568,15 @@ def cb_accounts(call):
     
     for i, acc in enumerate(accounts, 1):
         name = acc.get("name", "Unknown")
-        account_list += f"\n{i}. <code>{acc['phone']}</code> - {name}"
+        account_list += f"\n{i}. <code>+{acc['phone']}</code> - {name}"
     
-    text = f"👥 <b>Total: {len(accounts)}</b>{account_list}"
+    text = f"👥 <b>Stored Accounts (Total: {len(accounts)})</b>\n━━━━━━━━━━━━━━━━━━━━{account_list}"
     bot.edit_message_text(text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "help")
 def cb_help(call):
-    text = "📚 <b>Help:</b>\n\n1️⃣ Add Number\n2️⃣ Stream\n3️⃣ My Accounts"
+    text = "📚 <b>Help & Guide:</b>\n\n1️⃣ Click Add Number\n2️⃣ Send Phone Number\n3️⃣ Send OTP with format: <code>mrking\"83838\"</code>\n4️⃣ Use Stream to join voice chats."
     bot.edit_message_text(text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
@@ -551,7 +586,7 @@ def cb_cancel(call):
     active_clients.pop(str(call.from_user.id), None)
     db["pending"].pop(str(call.from_user.id), None)
     save_db()
-    bot.edit_message_text("❌ <b>Cancelled.</b>", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
+    bot.edit_message_text("❌ <b>Operation Cancelled.</b>", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 def run_bot():

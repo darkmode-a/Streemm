@@ -70,6 +70,13 @@ def get_cancel():
     markup.add(btn_cancel)
     return markup
 
+def get_otp_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_resend = types.InlineKeyboardButton("🔄 Resend OTP", callback_data="resend_otp")
+    btn_cancel = types.InlineKeyboardButton("❌ Cancel", callback_data="cancel")
+    markup.add(btn_resend, btn_cancel)
+    return markup
+
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
@@ -188,10 +195,10 @@ def handle_number(m):
             }
             
             bot.edit_message_text(
-                f"✅ <b>OTP sent to {clean}!</b>\n\nPlease enter the OTP code:",
+                f"✅ <b>OTP sent to {clean}!</b>\n\n⚠️ <b>OTP 2-3 minute mein expire ho jayega!</b>\n\nPlease enter the OTP code:",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
-                reply_markup=get_cancel()
+                reply_markup=get_otp_keyboard()
             )
             
         except Exception as e:
@@ -217,6 +224,58 @@ def handle_number(m):
             save_db()
     
     threading.Thread(target=send_otp, daemon=True).start()
+
+@bot.callback_query_handler(func=lambda call: call.data == "resend_otp")
+def cb_resend_otp(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ Unauthorized", show_alert=True)
+        return
+    
+    user_id = call.from_user.id
+    client_data = active_clients.get(str(user_id))
+    
+    if not client_data:
+        bot.answer_callback_query(call.id, "❌ Session expired. Start again.", show_alert=True)
+        return
+    
+    status_msg = bot.edit_message_text(
+        "⏳ <b>Resending OTP...</b>",
+        chat_id=user_id,
+        message_id=call.message.message_id
+    )
+    
+    def resend_otp():
+        try:
+            client = client_data["client"]
+            phone = client_data["phone"]
+            loop = client_data["loop"]
+            
+            async def resend():
+                result = await client.send_code_request(phone)
+                return result.phone_code_hash
+            
+            new_code_hash = loop.run_until_complete(resend())
+            
+            client_data["code_hash"] = new_code_hash
+            active_clients[str(user_id)] = client_data
+            
+            bot.edit_message_text(
+                f"✅ <b>New OTP sent to {phone}!</b>\n\n⚠️ <b>Jaldi enter karo - 2-3 min valid hai!</b>\n\nPlease enter the OTP:",
+                chat_id=user_id,
+                message_id=status_msg.message_id,
+                reply_markup=get_otp_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Resend error: {e}")
+            bot.edit_message_text(
+                f"❌ <b>Failed to resend OTP:</b>\n<code>{str(e)}</code>",
+                chat_id=user_id,
+                message_id=status_msg.message_id,
+                reply_markup=get_main_menu()
+            )
+    
+    threading.Thread(target=resend_otp, daemon=True).start()
+    bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_otp")
 def handle_otp(m):
@@ -258,6 +317,14 @@ def handle_otp(m):
                                 chat_id=user_id,
                                 message_id=status_msg.message_id,
                                 reply_markup=get_cancel()
+                            )
+                            return None
+                        elif "EXPIRED" in error_str.upper():
+                            bot.edit_message_text(
+                                "❌ <b>OTP expire ho gaya!</b>\n\n🔄 <b>Resend OTP</b> button dabao aur naya OTP enter karo.",
+                                chat_id=user_id,
+                                message_id=status_msg.message_id,
+                                reply_markup=get_otp_keyboard()
                             )
                             return None
                         else:
@@ -312,7 +379,7 @@ def handle_otp(m):
                 f"❌ <b>OTP verification failed:</b>\n<code>{str(e)}</code>",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
-                reply_markup=get_cancel()
+                reply_markup=get_otp_keyboard()
             )
     
     threading.Thread(target=verify_otp, daemon=True).start()

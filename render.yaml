@@ -1,0 +1,6 @@
+services:
+  - type: worker
+    name: combo-bot
+    env: python
+    buildCommand: ""
+    startCommand: python bot.py

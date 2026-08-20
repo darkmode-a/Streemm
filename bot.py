@@ -10,8 +10,8 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.phone import JoinGroupCallRequest, GetGroupCallRequest
-from telethon.tl.types import DataJSON
+from telethon.tl.functions.phone import JoinGroupCallRequest
+from telethon.tl.types import DataJSON, InputPeerChannel, InputPeerChat
 from flask import Flask
 
 BOT_TOKEN = "8920720185:AAF2sj4Rl_5XY3-Ohhc1X60G0yLYMBjSAIc"
@@ -44,7 +44,6 @@ def save_db():
 
 db = load_db()
 
-# Global event loop
 telethon_loop = asyncio.new_event_loop()
 telethon_thread = threading.Thread(target=telethon_loop.run_forever, daemon=True)
 telethon_thread.start()
@@ -53,7 +52,7 @@ active_clients = {}
 
 def run_async(coro):
     future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
-    return future.result(timeout=30)
+    return future.result(timeout=60)
 
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -282,7 +281,7 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# ========== STREAM SYSTEM (FIXED) ==========
+# ========== STREAM SYSTEM (FINAL FIX) ==========
 
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
@@ -310,15 +309,11 @@ def handle_stream(m):
     db["states"][str(user_id)] = "idle"
     save_db()
     accounts = db["accounts"].get(str(user_id), [])
-    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts to VC...</b>", reply_markup=get_main_menu())
+    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts...</b>", reply_markup=get_main_menu())
     
     def join_stream():
         success = 0
         failed = 0
-        
-        # Username nikaalo
-        channel = link.rstrip("/").split("/")[-1].split("?")[0]
-        username = channel.replace("@", "").replace("https://t.me/", "").replace("t.me/", "")
         
         for i, acc in enumerate(accounts, 1):
             async def _join_vc():
@@ -326,17 +321,33 @@ def handle_stream(m):
                 await client.connect()
                 
                 try:
+                    me = await client.get_me()
+                    entity = None
+                    
+                    # Username nikaalo
+                    username = link.split("/")[-1].split("?")[0].replace("@", "")
+                    
+                    # Entity resolve
                     entity = await client.get_entity(username)
                     
-                    # Get group call
-                    result = await client(GetGroupCallRequest(call=entity, limit=1))
+                    # Channel join (ZAROORI)
+                    try:
+                        await client(JoinChannelRequest(entity))
+                        await asyncio.sleep(2)
+                    except:
+                        pass
                     
-                    if result and result.call:
-                        me = await client.get_me()
+                    # Get full channel info
+                    from telethon import functions as tl_functions
+                    
+                    full_channel = await client(tl_functions.channels.GetFullChannelRequest(entity))
+                    
+                    if full_channel and full_channel.full_chat and full_channel.full_chat.call:
+                        call_obj = full_channel.full_chat.call
                         
-                        # Direct VC join
-                        await client(JoinGroupCallRequest(
-                            call=result.call,
+                        # VC JOIN - using full_chat.call directly
+                        await client(tl_functions.phone.JoinGroupCallRequest(
+                            call=call_obj,
                             params=DataJSON(data={}),
                             muted=False,
                             join_as=me
@@ -344,6 +355,7 @@ def handle_stream(m):
                         await client.disconnect()
                         return True
                     else:
+                        logger.warning(f"No active call found for {username}")
                         await client.disconnect()
                         return False
                         
@@ -367,17 +379,17 @@ def handle_stream(m):
             
             try:
                 bot.edit_message_text(
-                    f"🚀 <b>Joining...</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
+                    f"🚀 <b>Processing...</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
                     chat_id=user_id,
                     message_id=status_msg.message_id
                 )
             except:
                 pass
             
-            time.sleep(2)
+            time.sleep(3)
         
         bot.edit_message_text(
-            f"✅ <b>Done!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
+            f"✅ <b>Complete!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
             chat_id=user_id,
             message_id=status_msg.message_id,
             reply_markup=get_main_menu()

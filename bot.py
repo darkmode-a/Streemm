@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 from telebot import TeleBot, types
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.phone import JoinGroupCallRequest
@@ -169,15 +169,22 @@ def handle_number(m):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
-            client = TelegramClient(StringSession(), API_ID, API_HASH)
-            client.connect()
+            async def send_code_request():
+                client = TelegramClient(StringSession(), API_ID, API_HASH)
+                await client.connect()
+                
+                if not await client.is_user_authorized():
+                    result = await client.send_code_request(clean)
+                    return client, result.phone_code_hash
+                return None, None
             
-            result = loop.run_until_complete(client.send_code_request(clean))
+            client, phone_code_hash = loop.run_until_complete(send_code_request())
             
             active_clients[str(user_id)] = {
                 "client": client,
                 "phone": clean,
-                "code_hash": result.phone_code_hash
+                "code_hash": phone_code_hash,
+                "loop": loop
             }
             
             bot.edit_message_text(
@@ -186,10 +193,22 @@ def handle_number(m):
                 message_id=status_msg.message_id,
                 reply_markup=get_cancel()
             )
+            
         except Exception as e:
             logger.error(f"OTP error: {e}")
+            error_msg = str(e)
+            
+            if "API_ID" in error_msg or "API_HASH" in error_msg:
+                error_msg = "❌ API credentials galat hain. Nayi API ID/Hash lo."
+            elif "FLOOD" in error_msg.upper():
+                error_msg = "⚠️ Telegram ne temporarily block kiya. 24hrs baad try karo."
+            elif "PHONE_NUMBER_INVALID" in error_msg.upper():
+                error_msg = "❌ Phone number invalid hai."
+            elif "PHONE_NUMBER_BANNED" in error_msg.upper():
+                error_msg = "❌ Ye number Telegram se banned hai."
+            
             bot.edit_message_text(
-                f"❌ <b>Failed to send OTP:</b>\n<code>{str(e)}</code>",
+                f"❌ <b>Failed to send OTP:</b>\n<code>{error_msg}</code>",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_main_menu()
@@ -215,44 +234,80 @@ def handle_otp(m):
     
     def verify_otp():
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
             client = client_data["client"]
             phone = client_data["phone"]
             code_hash = client_data["code_hash"]
+            loop = client_data["loop"]
             
-            loop.run_until_complete(client.sign_in(phone=phone, code=otp, phone_code_hash=code_hash))
+            async def sign_in_and_save():
+                if not await client.is_user_authorized():
+                    try:
+                        await client.sign_in(
+                            phone=phone,
+                            code=otp,
+                            phone_code_hash=code_hash
+                        )
+                    except Exception as e:
+                        error_str = str(e)
+                        if "2FA" in error_str.upper() or "PASSWORD" in error_str.upper():
+                            db["states"][str(user_id)] = "awaiting_2fa"
+                            save_db()
+                            
+                            bot.edit_message_text(
+                                "🔐 <b>2FA Password Required!</b>\n\nYe account 2-step verification se protected hai.\n\nApna <b>Telegram password</b> enter karo:",
+                                chat_id=user_id,
+                                message_id=status_msg.message_id,
+                                reply_markup=get_cancel()
+                            )
+                            return None
+                        else:
+                            raise e
+                
+                session_string = client.session.save()
+                me = await client.get_me()
+                
+                if str(user_id) not in db["accounts"]:
+                    db["accounts"][str(user_id)] = []
+                
+                db["accounts"][str(user_id)].append({
+                    "phone": phone,
+                    "session": session_string,
+                    "name": me.first_name or "Unknown",
+                    "username": me.username or "",
+                    "added_at": datetime.now().isoformat()
+                })
+                
+                db["states"][str(user_id)] = "idle"
+                db["pending"].pop(str(user_id), None)
+                save_db()
+                
+                active_clients.pop(str(user_id), None)
+                await client.disconnect()
+                loop.close()
+                
+                total = len(db["accounts"][str(user_id)])
+                
+                bot.edit_message_text(
+                    f"🎉 <b>Account Added Successfully!</b>\n━━━━━━━━━━━━━━━━━━━━\n\n📱 <b>Phone:</b> <code>{phone}</code>\n👤 <b>Name:</b> {me.first_name}\n📊 <b>Total Accounts:</b> {total}",
+                    chat_id=user_id,
+                    message_id=status_msg.message_id,
+                    reply_markup=get_main_menu()
+                )
+                
+                return me
             
-            session_string = client.session.save()
-            me = loop.run_until_complete(client.get_me())
+            loop.run_until_complete(sign_in_and_save())
             
-            if str(user_id) not in db["accounts"]:
-                db["accounts"][str(user_id)] = []
-            
-            db["accounts"][str(user_id)].append({
-                "phone": phone,
-                "session": session_string,
-                "name": me.first_name or "Unknown",
-                "username": me.username or "",
-                "added_at": datetime.now().isoformat()
-            })
-            
-            db["states"][str(user_id)] = "idle"
-            active_clients.pop(str(user_id), None)
-            db["pending"].pop(str(user_id), None)
-            save_db()
-            
-            total = len(db["accounts"][str(user_id)])
-            
-            bot.edit_message_text(
-                f"🎉 <b>Account Added Successfully!</b>\n━━━━━━━━━━━━━━━━━━━━\n\n📱 <b>Phone:</b> <code>{phone}</code>\n👤 <b>Name:</b> {me.first_name}\n📊 <b>Total Accounts:</b> {total}",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_main_menu()
-            )
         except Exception as e:
             logger.error(f"Verify error: {e}")
+            
+            try:
+                if client_data.get("loop"):
+                    client_data["loop"].close()
+            except:
+                pass
+            active_clients.pop(str(user_id), None)
+            
             bot.edit_message_text(
                 f"❌ <b>OTP verification failed:</b>\n<code>{str(e)}</code>",
                 chat_id=user_id,
@@ -261,6 +316,81 @@ def handle_otp(m):
             )
     
     threading.Thread(target=verify_otp, daemon=True).start()
+
+@bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_2fa")
+def handle_2fa(m):
+    user_id = m.from_user.id
+    password = m.text.strip()
+    
+    client_data = active_clients.get(str(user_id))
+    if not client_data:
+        bot.reply_to(m, "❌ <b>Session expired.</b>\n\nClick Add Number again.", reply_markup=get_main_menu())
+        db["states"][str(user_id)] = "idle"
+        save_db()
+        return
+    
+    status_msg = bot.reply_to(m, "⏳ <b>Verifying Password...</b>")
+    
+    def verify_2fa():
+        try:
+            client = client_data["client"]
+            phone = client_data["phone"]
+            loop = client_data["loop"]
+            
+            async def complete_2fa():
+                await client.sign_in(password=password)
+                
+                session_string = client.session.save()
+                me = await client.get_me()
+                
+                if str(user_id) not in db["accounts"]:
+                    db["accounts"][str(user_id)] = []
+                
+                db["accounts"][str(user_id)].append({
+                    "phone": phone,
+                    "session": session_string,
+                    "name": me.first_name or "Unknown",
+                    "username": me.username or "",
+                    "added_at": datetime.now().isoformat()
+                })
+                
+                db["states"][str(user_id)] = "idle"
+                db["pending"].pop(str(user_id), None)
+                save_db()
+                
+                active_clients.pop(str(user_id), None)
+                await client.disconnect()
+                loop.close()
+                
+                total = len(db["accounts"][str(user_id)])
+                
+                bot.edit_message_text(
+                    f"🎉 <b>Account Added Successfully!</b>\n━━━━━━━━━━━━━━━━━━━━\n\n📱 <b>Phone:</b> <code>{phone}</code>\n👤 <b>Name:</b> {me.first_name}\n📊 <b>Total Accounts:</b> {total}",
+                    chat_id=user_id,
+                    message_id=status_msg.message_id,
+                    reply_markup=get_main_menu()
+                )
+            
+            loop.run_until_complete(complete_2fa())
+            
+        except Exception as e:
+            logger.error(f"2FA error: {e}")
+            
+            try:
+                if client_data.get("loop"):
+                    client_data["loop"].close()
+            except:
+                pass
+            active_clients.pop(str(user_id), None)
+            
+            bot.edit_message_text(
+                f"❌ <b>Password verification failed:</b>\n<code>{str(e)}</code>",
+                chat_id=user_id,
+                message_id=status_msg.message_id,
+                reply_markup=get_cancel()
+            )
+    
+    threading.Thread(target=verify_2fa, daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
@@ -312,25 +442,29 @@ def handle_stream(m):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
-                client.connect()
+                async def join_vc():
+                    client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
+                    await client.connect()
+                    
+                    entity = await client.get_entity(channel)
+                    await client(JoinChannelRequest(entity))
+                    await asyncio.sleep(0.5)
+                    
+                    try:
+                        me = await client.get_me()
+                        await client(JoinGroupCallRequest(
+                            call=entity,
+                            params=DataJSON(data={}),
+                            muted=False,
+                            join_as=me
+                        ))
+                    except Exception as vc_err:
+                        logger.warning(f"VC join error: {vc_err}")
+                    
+                    await client.disconnect()
                 
-                entity = loop.run_until_complete(client.get_entity(channel))
-                
-                loop.run_until_complete(client(JoinChannelRequest(entity)))
-                time.sleep(0.5)
-                
-                try:
-                    loop.run_until_complete(client(JoinGroupCallRequest(
-                        call=entity,
-                        params=DataJSON(data={}),
-                        muted=False,
-                        join_as=client.get_me()
-                    )))
-                except Exception as vc_err:
-                    logger.warning(f"VC join error for {acc['phone']}: {vc_err}")
-                
-                client.disconnect()
+                loop.run_until_complete(join_vc())
+                loop.close()
                 success += 1
                 
                 try:
@@ -435,7 +569,7 @@ def run_bot():
         logger.info(f"Logged in as @{bot_info.username}")
         logger.info(f"Admin: {ADMIN_ID}")
         logger.info("Bot is now polling...")
-        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        bot.infinity_polling(timeout=10, long_polling_timeout=5, skip_pending=True)
     except Exception as e:
         logger.critical(f"Critical error: {e}")
 

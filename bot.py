@@ -10,7 +10,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.phone import JoinGroupCallRequest
+from telethon.tl.functions.phone import JoinGroupCallRequest, GetGroupCallRequest
 from telethon.tl.types import DataJSON
 from flask import Flask
 
@@ -44,16 +44,14 @@ def save_db():
 
 db = load_db()
 
-# Global event loop - hamesha alive
+# Global event loop
 telethon_loop = asyncio.new_event_loop()
 telethon_thread = threading.Thread(target=telethon_loop.run_forever, daemon=True)
 telethon_thread.start()
 
-# Active clients - OTP verify ke liye connected rehte hain
 active_clients = {}
 
 def run_async(coro):
-    """Coroutine ko global loop par schedule karo aur result wait karo"""
     future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
     return future.result(timeout=30)
 
@@ -124,7 +122,6 @@ def handle_number(m):
             client = TelegramClient(StringSession(), API_ID, API_HASH)
             await client.connect()
             result = await client.send_code_request(phone)
-            # Client ko CONNECTED rakho - disconnect mat karo
             active_clients[str(user_id)] = {
                 "client": client,
                 "phone": phone,
@@ -285,7 +282,7 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# --- Stream, Accounts, Help, Cancel same as before (using run_async) ---
+# ========== STREAM SYSTEM (FIXED) ==========
 
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
@@ -313,46 +310,82 @@ def handle_stream(m):
     db["states"][str(user_id)] = "idle"
     save_db()
     accounts = db["accounts"].get(str(user_id), [])
-    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts...</b>", reply_markup=get_main_menu())
+    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts to VC...</b>", reply_markup=get_main_menu())
     
     def join_stream():
         success = 0
         failed = 0
+        
+        # Username nikaalo
         channel = link.rstrip("/").split("/")[-1].split("?")[0]
+        username = channel.replace("@", "").replace("https://t.me/", "").replace("t.me/", "")
         
         for i, acc in enumerate(accounts, 1):
-            async def _join():
+            async def _join_vc():
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
                 await client.connect()
-                entity = await client.get_entity(channel)
-                await client(JoinChannelRequest(entity))
-                await asyncio.sleep(0.5)
+                
                 try:
-                    me = await client.get_me()
-                    await client(JoinGroupCallRequest(
-                        call=entity,
-                        params=DataJSON(data={}),
-                        muted=False,
-                        join_as=me
-                    ))
-                except:
-                    pass
-                await client.disconnect()
+                    entity = await client.get_entity(username)
+                    
+                    # Get group call
+                    result = await client(GetGroupCallRequest(call=entity, limit=1))
+                    
+                    if result and result.call:
+                        me = await client.get_me()
+                        
+                        # Direct VC join
+                        await client(JoinGroupCallRequest(
+                            call=result.call,
+                            params=DataJSON(data={}),
+                            muted=False,
+                            join_as=me
+                        ))
+                        await client.disconnect()
+                        return True
+                    else:
+                        await client.disconnect()
+                        return False
+                        
+                except Exception as e:
+                    logger.error(f"VC join failed for {acc['phone']}: {e}")
+                    try:
+                        await client.disconnect()
+                    except:
+                        pass
+                    return False
+            
             try:
-                run_async(_join())
-                success += 1
-            except:
+                joined = run_async(_join_vc())
+                if joined:
+                    success += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                logger.error(f"Failed {acc['phone']}: {e}")
                 failed += 1
+            
+            try:
+                bot.edit_message_text(
+                    f"🚀 <b>Joining...</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
+                    chat_id=user_id,
+                    message_id=status_msg.message_id
+                )
+            except:
+                pass
+            
             time.sleep(2)
         
         bot.edit_message_text(
-            f"✅ Done! Success: {success}, Failed: {failed}",
+            f"✅ <b>Done!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
             chat_id=user_id,
             message_id=status_msg.message_id,
             reply_markup=get_main_menu()
         )
     
     threading.Thread(target=join_stream, daemon=True).start()
+
+# ========== OTHER HANDLERS ==========
 
 @bot.callback_query_handler(func=lambda call: call.data == "my_accounts")
 def cb_accounts(call):
@@ -376,7 +409,6 @@ def cb_help(call):
 @bot.callback_query_handler(func=lambda call: call.data == "cancel")
 def cb_cancel(call):
     db["states"][str(call.from_user.id)] = "idle"
-    # Disconnect any active client
     client_data = active_clients.pop(str(call.from_user.id), None)
     if client_data:
         try:

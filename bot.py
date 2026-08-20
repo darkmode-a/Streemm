@@ -11,7 +11,7 @@ from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.phone import JoinGroupCallRequest
-from telethon.tl.types import DataJSON, InputPeerChannel, InputPeerChat
+from telethon.tl.types import DataJSON
 from flask import Flask
 
 BOT_TOKEN = "8920720185:AAF2sj4Rl_5XY3-Ohhc1X60G0yLYMBjSAIc"
@@ -281,7 +281,7 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# ========== STREAM SYSTEM (FINAL FIX) ==========
+# ========== STREAM SYSTEM (FINAL) ==========
 
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
@@ -317,45 +317,41 @@ def handle_stream(m):
         
         for i, acc in enumerate(accounts, 1):
             async def _join_vc():
+                from telethon import functions as tl_functions
+                
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
                 await client.connect()
                 
                 try:
                     me = await client.get_me()
-                    entity = None
                     
-                    # Username nikaalo
                     username = link.split("/")[-1].split("?")[0].replace("@", "")
-                    
-                    # Entity resolve
                     entity = await client.get_entity(username)
                     
-                    # Channel join (ZAROORI)
+                    # Channel join (zaroori)
                     try:
                         await client(JoinChannelRequest(entity))
                         await asyncio.sleep(2)
                     except:
                         pass
                     
-                    # Get full channel info
-                    from telethon import functions as tl_functions
-                    
+                    # Get full channel - sahi call object ke liye
                     full_channel = await client(tl_functions.channels.GetFullChannelRequest(entity))
                     
                     if full_channel and full_channel.full_chat and full_channel.full_chat.call:
                         call_obj = full_channel.full_chat.call
                         
-                        # VC JOIN - using full_chat.call directly
+                        # VC JOIN - data string ke saath
                         await client(tl_functions.phone.JoinGroupCallRequest(
                             call=call_obj,
-                            params=DataJSON(data={}),
+                            params=DataJSON(data="{}"),
                             muted=False,
                             join_as=me
                         ))
                         await client.disconnect()
                         return True
                     else:
-                        logger.warning(f"No active call found for {username}")
+                        logger.warning(f"No active call for {username}")
                         await client.disconnect()
                         return False
                         

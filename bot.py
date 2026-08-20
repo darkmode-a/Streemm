@@ -25,10 +25,7 @@ app = Flask(__name__)
 def home():
     return "Combo Bot is running!"
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot = TeleBot(BOT_TOKEN, threaded=True, parse_mode="HTML")
@@ -46,7 +43,19 @@ def save_db():
         json.dump(db, f, indent=2)
 
 db = load_db()
-active_sessions = {}
+
+# Global event loop - hamesha alive
+telethon_loop = asyncio.new_event_loop()
+telethon_thread = threading.Thread(target=telethon_loop.run_forever, daemon=True)
+telethon_thread.start()
+
+# Active clients - OTP verify ke liye connected rehte hain
+active_clients = {}
+
+def run_async(coro):
+    """Coroutine ko global loop par schedule karo aur result wait karo"""
+    future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
+    return future.result(timeout=30)
 
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -73,31 +82,21 @@ def cmd_start(message):
     if not is_admin(message.from_user.id):
         bot.reply_to(message, "⛔ Unauthorized")
         return
-    
     db["states"][str(message.from_user.id)] = "idle"
     save_db()
-    
-    text = """
-🤖 <b>Combo Bot</b>
-━━━━━━━━━━━━━━━━━━━━
-
-📱 <b>Add Number</b> - Login with OTP
-📡 <b>Stream</b> - Join VC
-👥 <b>My Accounts</b> - View accounts
-
-━━━━━━━━━━━━━━━━━━━━
-"""
-    bot.reply_to(message, text, reply_markup=get_main_menu(), disable_web_page_preview=True)
+    bot.reply_to(
+        message,
+        "🤖 <b>Combo Bot</b>\n\n📱 Add Number\n📡 Stream\n👥 My Accounts",
+        reply_markup=get_main_menu()
+    )
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_number")
 def cb_add_number(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔", show_alert=True)
         return
-    
     db["states"][str(call.from_user.id)] = "awaiting_number"
     save_db()
-    
     bot.edit_message_text(
         "📱 <b>Send phone number:</b>\n\nFormat: <code>+919876543210</code>",
         chat_id=call.from_user.id,
@@ -109,11 +108,10 @@ def cb_add_number(call):
 @bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_number")
 def handle_number(m):
     user_id = m.from_user.id
-    phone = m.text.strip()
-    clean = phone.replace("+", "").replace(" ", "").replace("-", "")
+    phone = m.text.strip().replace("+", "").replace(" ", "").replace("-", "")
     
-    if not clean.isdigit() or len(clean) < 10:
-        bot.reply_to(m, "❌ Invalid number. Format: +919876543210", reply_markup=get_cancel())
+    if not phone.isdigit() or len(phone) < 10:
+        bot.reply_to(m, "❌ Invalid number", reply_markup=get_cancel())
         return
     
     db["states"][str(user_id)] = "awaiting_otp"
@@ -122,30 +120,22 @@ def handle_number(m):
     status_msg = bot.reply_to(m, "⏳ <b>Sending OTP...</b>")
     
     def send_otp():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def do_send():
+        async def _send():
             client = TelegramClient(StringSession(), API_ID, API_HASH)
             await client.connect()
-            result = await client.send_code_request(clean)
-            session_string = client.session.save()
-            await client.disconnect()
-            return result.phone_code_hash, session_string
+            result = await client.send_code_request(phone)
+            # Client ko CONNECTED rakho - disconnect mat karo
+            active_clients[str(user_id)] = {
+                "client": client,
+                "phone": phone,
+                "code_hash": result.phone_code_hash
+            }
+            return result.phone_code_hash
         
         try:
-            phone_code_hash, session_string = loop.run_until_complete(do_send())
-            loop.close()
-            
-            active_sessions[str(user_id)] = {
-                "phone": clean,
-                "code_hash": phone_code_hash,
-                "session_string": session_string,
-                "timestamp": time.time()
-            }
-            
+            run_async(_send())
             bot.edit_message_text(
-                f"✅ <b>OTP sent to {clean}!</b>\n\nEnter OTP code:",
+                f"✅ <b>OTP sent to {phone}!</b>\n\nEnter OTP code:",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_cancel()
@@ -153,7 +143,7 @@ def handle_number(m):
         except Exception as e:
             logger.error(f"OTP error: {e}")
             bot.edit_message_text(
-                f"❌ <b>Failed:</b>\n<code>{str(e)}</code>",
+                f"❌ Failed: {str(e)}",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_main_menu()
@@ -168,8 +158,8 @@ def handle_otp(m):
     user_id = m.from_user.id
     otp = m.text.strip()
     
-    session_data = active_sessions.get(str(user_id))
-    if not session_data:
+    client_data = active_clients.get(str(user_id))
+    if not client_data:
         bot.reply_to(m, "❌ Session expired. Start again.", reply_markup=get_main_menu())
         db["states"][str(user_id)] = "idle"
         save_db()
@@ -178,33 +168,22 @@ def handle_otp(m):
     status_msg = bot.reply_to(m, "⏳ <b>Verifying OTP...</b>")
     
     def verify_otp():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def do_verify():
-            client = TelegramClient(
-                StringSession(session_data["session_string"]),
-                API_ID,
-                API_HASH
-            )
-            await client.connect()
+        async def _verify():
+            client = client_data["client"]
+            phone = client_data["phone"]
+            code_hash = client_data["code_hash"]
             
             try:
-                await client.sign_in(
-                    phone=session_data["phone"],
-                    code=otp,
-                    phone_code_hash=session_data["code_hash"]
-                )
+                await client.sign_in(phone=phone, code=otp, phone_code_hash=code_hash)
             except SessionPasswordNeededError:
                 db["states"][str(user_id)] = "awaiting_2fa"
                 save_db()
                 bot.edit_message_text(
-                    "🔐 <b>2FA Password Required!</b>\n\nEnter Telegram password:",
+                    "🔐 <b>2FA Password Required!</b>\n\nEnter password:",
                     chat_id=user_id,
                     message_id=status_msg.message_id,
                     reply_markup=get_cancel()
                 )
-                await client.disconnect()
                 return None
             
             session_string = client.session.save()
@@ -214,7 +193,7 @@ def handle_otp(m):
                 db["accounts"][str(user_id)] = []
             
             db["accounts"][str(user_id)].append({
-                "phone": session_data["phone"],
+                "phone": phone,
                 "session": session_string,
                 "name": me.first_name or "Unknown",
                 "username": me.username or "",
@@ -223,27 +202,26 @@ def handle_otp(m):
             
             db["states"][str(user_id)] = "idle"
             save_db()
-            active_sessions.pop(str(user_id), None)
+            
             await client.disconnect()
+            active_clients.pop(str(user_id), None)
             
             total = len(db["accounts"][str(user_id)])
             
             bot.edit_message_text(
-                f"🎉 <b>Account Added!</b>\n━━━━━━━━━━━━━━━━━━━━\n\n📱 {session_data['phone']}\n👤 {me.first_name}\n📊 Total: {total}",
+                f"🎉 <b>Account Added!</b>\n\n📱 {phone}\n👤 {me.first_name}\n📊 Total: {total}",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_main_menu()
             )
-            
             return me
         
         try:
-            loop.run_until_complete(do_verify())
-            loop.close()
+            run_async(_verify())
         except Exception as e:
             logger.error(f"Verify error: {e}")
             bot.edit_message_text(
-                f"❌ <b>Failed:</b>\n<code>{str(e)}</code>",
+                f"❌ Failed: {str(e)}",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_cancel()
@@ -256,24 +234,16 @@ def handle_2fa(m):
     user_id = m.from_user.id
     password = m.text.strip()
     
-    session_data = active_sessions.get(str(user_id))
-    if not session_data:
+    client_data = active_clients.get(str(user_id))
+    if not client_data:
         bot.reply_to(m, "❌ Session expired.", reply_markup=get_main_menu())
         return
     
     status_msg = bot.reply_to(m, "⏳ <b>Verifying...</b>")
     
     def verify_2fa():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        async def do_2fa():
-            client = TelegramClient(
-                StringSession(session_data["session_string"]),
-                API_ID,
-                API_HASH
-            )
-            await client.connect()
+        async def _2fa():
+            client = client_data["client"]
             await client.sign_in(password=password)
             
             session_string = client.session.save()
@@ -283,7 +253,7 @@ def handle_2fa(m):
                 db["accounts"][str(user_id)] = []
             
             db["accounts"][str(user_id)].append({
-                "phone": session_data["phone"],
+                "phone": client_data["phone"],
                 "session": session_string,
                 "name": me.first_name or "Unknown",
                 "username": me.username or "",
@@ -292,19 +262,18 @@ def handle_2fa(m):
             
             db["states"][str(user_id)] = "idle"
             save_db()
-            active_sessions.pop(str(user_id), None)
             await client.disconnect()
+            active_clients.pop(str(user_id), None)
             
             bot.edit_message_text(
-                f"🎉 <b>Account Added!</b>\n\n📱 {session_data['phone']}\n👤 {me.first_name}",
+                f"🎉 <b>Account Added!</b>\n\n📱 {client_data['phone']}\n👤 {me.first_name}",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_main_menu()
             )
         
         try:
-            loop.run_until_complete(do_2fa())
-            loop.close()
+            run_async(_2fa())
         except Exception as e:
             logger.error(f"2FA error: {e}")
             bot.edit_message_text(
@@ -316,17 +285,17 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
+# --- Stream, Accounts, Help, Cancel same as before (using run_async) ---
+
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
     if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "⛔", show_alert=True)
         return
-    
     accounts = db["accounts"].get(str(call.from_user.id), [])
     if not accounts:
         bot.answer_callback_query(call.id, "❌ No accounts!", show_alert=True)
         return
-    
     db["states"][str(call.from_user.id)] = "awaiting_stream"
     save_db()
     bot.edit_message_text(
@@ -341,7 +310,6 @@ def cb_stream(call):
 def handle_stream(m):
     user_id = m.from_user.id
     link = m.text.strip()
-    
     db["states"][str(user_id)] = "idle"
     save_db()
     accounts = db["accounts"].get(str(user_id), [])
@@ -353,10 +321,7 @@ def handle_stream(m):
         channel = link.rstrip("/").split("/")[-1].split("?")[0]
         
         for i, acc in enumerate(accounts, 1):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            async def do_join():
+            async def _join():
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
                 await client.connect()
                 entity = await client.get_entity(channel)
@@ -373,10 +338,8 @@ def handle_stream(m):
                 except:
                     pass
                 await client.disconnect()
-            
             try:
-                loop.run_until_complete(do_join())
-                loop.close()
+                run_async(_join())
                 success += 1
             except:
                 failed += 1
@@ -413,7 +376,13 @@ def cb_help(call):
 @bot.callback_query_handler(func=lambda call: call.data == "cancel")
 def cb_cancel(call):
     db["states"][str(call.from_user.id)] = "idle"
-    active_sessions.pop(str(call.from_user.id), None)
+    # Disconnect any active client
+    client_data = active_clients.pop(str(call.from_user.id), None)
+    if client_data:
+        try:
+            asyncio.run_coroutine_threadsafe(client_data["client"].disconnect(), telethon_loop)
+        except:
+            pass
     save_db()
     bot.edit_message_text("❌ Cancelled.", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
@@ -430,6 +399,5 @@ def run_bot():
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-    
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

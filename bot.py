@@ -35,7 +35,7 @@ def load_db():
     if os.path.exists(DATABASE_FILE):
         with open(DATABASE_FILE, 'r') as f:
             return json.load(f)
-    return {"accounts": {}, "states": {}, "pending": {}}
+    return {"accounts": {}, "states": {}, "pending": {}, "vc_targets": {}}
 
 def save_db():
     with open(DATABASE_FILE, 'w') as f:
@@ -60,7 +60,10 @@ def get_main_menu():
         types.InlineKeyboardButton("📡 Stream", callback_data="stream")
     )
     markup.add(
-        types.InlineKeyboardButton("👥 My Accounts", callback_data="my_accounts"),
+        types.InlineKeyboardButton("🚀 Auto Join VC", callback_data="auto_join_vc"),
+        types.InlineKeyboardButton("👥 My Accounts", callback_data="my_accounts")
+    )
+    markup.add(
         types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
     )
     return markup
@@ -73,6 +76,8 @@ def get_cancel():
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
+
+# ═══════════════ START COMMAND ═══════════════
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     if not is_admin(message.from_user.id):
@@ -86,10 +91,13 @@ def cmd_start(message):
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📱 <b>Add Number:</b> Login accounts safely\n"
         "📡 <b>Stream:</b> Join VC with all accounts\n"
+        "🚀 <b>Auto Join:</b> One-click VC join\n"
         "👥 <b>My Accounts:</b> View saved accounts\n"
     )
     bot.reply_to(message, text, reply_markup=get_main_menu())
 
+
+# ═══════════════ ADD NUMBER SYSTEM ═══════════════
 @bot.callback_query_handler(func=lambda call: call.data == "add_number")
 def cb_add_number(call):
     if not is_admin(call.from_user.id):
@@ -147,7 +155,7 @@ def handle_number(m):
     
     threading.Thread(target=send_otp, daemon=True).start()
 
-# ========== SMART OTP EXTRACTION (ANTI-PHISHING BYPASS) ==========
+
 @bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_otp")
 def handle_otp(m):
     user_id = m.from_user.id
@@ -217,6 +225,7 @@ def handle_otp(m):
     
     threading.Thread(target=verify_otp, daemon=True).start()
 
+
 @bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_2fa")
 def handle_2fa(m):
     user_id = m.from_user.id
@@ -267,7 +276,8 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# ========== STREAM & VOICE CHAT JOIN SYSTEM (SMART PARSER + ROBUST DIRECT VC) ==========
+
+# ═══════════════ STREAM SYSTEM ═══════════════
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
     if not is_admin(call.from_user.id):
@@ -297,7 +307,6 @@ def handle_stream(m):
     
     status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts to VC...</b>", reply_markup=get_main_menu())
     
-    # 🔍 Smart Link Parser (Ignores message IDs like /123 and handles post links securely)
     clean_link = link.split("?")[0].rstrip("/")
     parts = [p for p in clean_link.split("/") if p and p not in ["https:", "http:", "t.me", "telegram.dog"]]
     
@@ -305,7 +314,7 @@ def handle_stream(m):
     username = username.replace("@", "").strip()
     
     if not username:
-        bot.edit_message_text("❌ <b>Invalid link!</b> Kripya sahi channel link bhejein.", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_main_menu())
+        bot.edit_message_text("❌ <b>Invalid link!</b>", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_main_menu())
         return
 
     def join_stream():
@@ -321,32 +330,39 @@ def handle_stream(m):
                     me = await client.get_me()
                     entity = await client.get_entity(username)
                     
-                    # Get full channel - call object ke liye
                     full_channel = await client(tl_functions.channels.GetFullChannelRequest(entity))
                     
                     if full_channel and full_channel.full_chat and full_channel.full_chat.call:
                         call_obj = full_channel.full_chat.call
                         
-                        # ROBUST DIRECT VC JOIN with SSRC / Already Joined handling
+                        import json as json_lib
+                        params_data = {
+                            "ufrag": "",
+                            "pwd": "",
+                            "fingerprints": [],
+                            "ssrc": 0
+                        }
+                        
                         for retry in range(3):
                             try:
                                 result = await client(tl_functions.phone.JoinGroupCallRequest(
                                     call=call_obj,
-                                    params=DataJSON(data="{}"),
+                                    params=DataJSON(data=json_lib.dumps(params_data)),
                                     muted=False,
                                     join_as=me
                                 ))
                                 
                                 if result:
+                                    logger.info(f"✅ {acc['phone']} joined VC!")
                                     await client.disconnect()
                                     return True
                                     
                             except Exception as e:
                                 error_str = str(e).lower()
-                                if "ssrc" in error_str:
+                                if "ssrc" in error_str or "retry" in error_str:
                                     await asyncio.sleep(2)
                                     continue
-                                elif "already" in error_str:
+                                elif "already" in error_str or "joined" in error_str:
                                     await client.disconnect()
                                     return True
                                 else:
@@ -356,7 +372,7 @@ def handle_stream(m):
                         await client.disconnect()
                         return False
                     else:
-                        logger.warning(f"No active VC for {username}")
+                        logger.warning(f"No active VC in @{username}")
                         await client.disconnect()
                         return False
                         
@@ -374,30 +390,265 @@ def handle_stream(m):
                     success += 1
                 else:
                     failed += 1
-            except:
+            except Exception as e:
+                logger.error(f"Account {acc['phone']} failed: {e}")
                 failed += 1
             
             try:
                 bot.edit_message_text(
-                    f"🚀 <b>Joining VC...</b>\nTarget: <code>@{username}</code>\n✅ Success: {success}\n❌ Failed: {failed}",
+                    f"🚀 <b>Joining VC...</b>\n\n"
+                    f"Target: <code>@{username}</code>\n"
+                    f"Progress: {i}/{len(accounts)}\n"
+                    f"✅ Success: {success}\n"
+                    f"❌ Failed: {failed}",
                     chat_id=user_id,
                     message_id=status_msg.message_id
                 )
             except:
                 pass
             
-            time.sleep(2)
+            time.sleep(3)
         
         bot.edit_message_text(
-            f"✅ <b>Complete!</b>\n\nTarget: <code>@{username}</code>\n✅ Success: {success}\n❌ Failed: {failed}",
+            f"✅ <b>Stream Complete!</b>\n\n"
+            f"Target: <code>@{username}</code>\n"
+            f"✅ Success: {success}\n"
+            f"❌ Failed: {failed}",
+            chat_id=user_id,
+            message_id=status_msg.message_id,
+            reply_markup=get_main_menu()
+        )
+        
+        # Save VC target for future
+        db["vc_targets"][str(user_id)] = link
+        save_db()
+    
+    threading.Thread(target=join_stream, daemon=True).start()
+
+
+# ═══════════════ AUTO JOIN VC SYSTEM ═══════════════
+@bot.callback_query_handler(func=lambda call: call.data == "auto_join_vc")
+def cb_auto_join(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "⛔ Unauthorized", show_alert=True)
+        return
+    
+    user_id = call.from_user.id
+    accounts = db["accounts"].get(str(user_id), [])
+    
+    if not accounts:
+        bot.answer_callback_query(call.id, "❌ No accounts! Pehle Add Number karo.", show_alert=True)
+        return
+    
+    saved_vc = db.get("vc_targets", {}).get(str(user_id))
+    
+    if saved_vc:
+        # Saved VC exists - show confirmation
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✅ Yes, Join!", callback_data=f"confirm_join:{saved_vc}"),
+            types.InlineKeyboardButton("🔄 New Link", callback_data="new_vc_link")
+        )
+        
+        bot.edit_message_text(
+            f"🎯 <b>Saved VC Found!</b>\n\n"
+            f"Link: <code>{saved_vc}</code>\n"
+            f"Accounts: {len(accounts)}\n\n"
+            f"Join with saved VC?",
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            reply_markup=markup
+        )
+    else:
+        # No saved VC - ask for new link
+        db["states"][str(user_id)] = "awaiting_auto_join"
+        save_db()
+        bot.edit_message_text(
+            f"📡 <b>Auto Join - Send VC Link:</b>\n\n"
+            f"Active Accounts: {len(accounts)}",
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            reply_markup=get_cancel()
+        )
+    
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "new_vc_link")
+def cb_new_vc(call):
+    if not is_admin(call.from_user.id):
+        return
+    
+    user_id = call.from_user.id
+    accounts = db["accounts"].get(str(user_id), [])
+    db["states"][str(user_id)] = "awaiting_auto_join"
+    save_db()
+    
+    bot.edit_message_text(
+        f"📡 <b>Send New VC Link:</b>\n\nActive Accounts: {len(accounts)}",
+        chat_id=user_id,
+        message_id=call.message.message_id,
+        reply_markup=get_cancel()
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_join:"))
+def cb_confirm_join(call):
+    if not is_admin(call.from_user.id):
+        return
+    
+    vc_link = call.data.split(":", 1)[1]
+    user_id = call.from_user.id
+    
+    bot.edit_message_text(
+        f"🚀 <b>Starting Auto Join...</b>",
+        chat_id=user_id,
+        message_id=call.message.message_id
+    )
+    
+    trigger_auto_join(user_id, vc_link, call.message)
+    bot.answer_callback_query(call.id, "✅ Join Started!")
+
+
+@bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_auto_join")
+def handle_auto_join(m):
+    user_id = m.from_user.id
+    vc_link = m.text.strip()
+    db["states"][str(user_id)] = "idle"
+    
+    db["vc_targets"] = db.get("vc_targets", {})
+    db["vc_targets"][str(user_id)] = vc_link
+    save_db()
+    
+    trigger_auto_join(user_id, vc_link, m)
+
+
+def trigger_auto_join(user_id, vc_link, message):
+    """Core auto join - All accounts join VC"""
+    accounts = db["accounts"].get(str(user_id), [])
+    
+    status_msg = bot.send_message(
+        user_id,
+        f"🚀 <b>Auto Join Started!</b>\n\nTarget: <code>{vc_link}</code>\nAccounts: {len(accounts)}",
+        reply_markup=get_main_menu()
+    )
+    
+    clean_link = vc_link.split("?")[0].rstrip("/")
+    parts = [p for p in clean_link.split("/") if p and p not in ["https:", "http:", "t.me", "telegram.dog"]]
+    username = parts[0].replace("@", "").strip() if parts else ""
+    
+    if not username:
+        bot.edit_message_text("❌ Invalid VC link!", chat_id=user_id, message_id=status_msg.message_id)
+        return
+    
+    import json as json_lib
+    
+    def join_all():
+        success = 0
+        failed = 0
+        
+        for i, acc in enumerate(accounts, 1):
+            async def _join():
+                client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
+                await client.connect()
+                
+                try:
+                    me = await client.get_me()
+                    
+                    try:
+                        entity = await client.get_entity(username)
+                    except:
+                        entity = await client.get_entity(f"@{username}")
+                    
+                    full_channel = await client(tl_functions.channels.GetFullChannelRequest(entity))
+                    
+                    if full_channel and full_channel.full_chat and full_channel.full_chat.call:
+                        call_obj = full_channel.full_chat.call
+                        
+                        params_data = {
+                            "ufrag": "",
+                            "pwd": "",
+                            "fingerprints": [],
+                            "ssrc": 0
+                        }
+                        
+                        for retry in range(3):
+                            try:
+                                result = await client(tl_functions.phone.JoinGroupCallRequest(
+                                    call=call_obj,
+                                    params=DataJSON(data=json_lib.dumps(params_data)),
+                                    muted=False,
+                                    join_as=me
+                                ))
+                                
+                                if result:
+                                    return True
+                                    
+                            except Exception as e:
+                                error_str = str(e).lower()
+                                if "ssrc" in error_str or "retry" in error_str:
+                                    await asyncio.sleep(2)
+                                    continue
+                                elif "already" in error_str or "joined" in error_str:
+                                    return True
+                                else:
+                                    logger.error(f"Join error: {e}")
+                                    break
+                    else:
+                        logger.warning(f"No active VC in @{username}")
+                    
+                except Exception as e:
+                    logger.error(f"Account {acc['phone']} failed: {e}")
+                finally:
+                    try:
+                        await client.disconnect()
+                    except:
+                        pass
+                
+                return False
+            
+            try:
+                result = run_async(_join())
+                if result:
+                    success += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                logger.error(f"Failed: {e}")
+                failed += 1
+            
+            if i % 3 == 0 or i == len(accounts):
+                try:
+                    bot.edit_message_text(
+                        f"🚀 <b>Joining...</b>\n\n"
+                        f"Progress: {i}/{len(accounts)}\n"
+                        f"✅ Success: {success}\n"
+                        f"❌ Failed: {failed}",
+                        chat_id=user_id,
+                        message_id=status_msg.message_id,
+                        reply_markup=get_main_menu()
+                    )
+                except:
+                    pass
+            
+            time.sleep(3)
+        
+        bot.edit_message_text(
+            f"🎉 <b>Auto Join Complete!</b>\n\n"
+            f"Target: <code>@{username}</code>\n"
+            f"Total: {len(accounts)}\n"
+            f"✅ Success: {success}\n"
+            f"❌ Failed: {failed}",
             chat_id=user_id,
             message_id=status_msg.message_id,
             reply_markup=get_main_menu()
         )
     
-    threading.Thread(target=join_stream, daemon=True).start()
+    threading.Thread(target=join_all, daemon=True).start()
 
-# ========== OTHER HANDLERS ==========
+
+# ═══════════════ OTHER HANDLERS ═══════════════
 @bot.callback_query_handler(func=lambda call: call.data == "my_accounts")
 def cb_accounts(call):
     accounts = db["accounts"].get(str(call.from_user.id), [])
@@ -415,7 +666,8 @@ def cb_help(call):
         "📚 <b>Bot Instructions:</b>\n\n"
         "1️⃣ Click <b>Add Number</b> & send phone number.\n"
         "2️⃣ Send OTP with watermark format: <code>mrking\"83838\"</code>\n"
-        "3️⃣ Click <b>Stream</b> & send channel link to join VC automatically."
+        "3️⃣ Click <b>Stream</b> or <b>Auto Join</b> to join VC.\n"
+        "4️⃣ Auto Join saves your VC link for future!"
     )
     bot.edit_message_text(help_text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
@@ -428,6 +680,8 @@ def cb_cancel(call):
     bot.edit_message_text("❌ <b>Operation Cancelled.</b>", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
+
+# ═══════════════ MAIN ═══════════════
 def run_bot():
     logger.info("Combo Bot starting...")
     try:

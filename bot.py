@@ -8,6 +8,7 @@ from datetime import datetime
 from telebot import TeleBot, types
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.phone import JoinGroupCallRequest
 from telethon.tl.types import DataJSON
@@ -38,40 +39,32 @@ def load_db():
     if os.path.exists(DATABASE_FILE):
         with open(DATABASE_FILE, 'r') as f:
             return json.load(f)
-    return {
-        "accounts": {},
-        "states": {},
-        "pending": {}
-    }
+    return {"accounts": {}, "states": {}}
 
 def save_db():
     with open(DATABASE_FILE, 'w') as f:
         json.dump(db, f, indent=2)
 
 db = load_db()
-pending_otp_data = {}
+
+# Client ko alive rakho - session ke saath
+active_sessions = {}
 
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_add = types.InlineKeyboardButton("📱 Add Number", callback_data="add_number")
-    btn_stream = types.InlineKeyboardButton("📡 Stream", callback_data="stream")
-    btn_accounts = types.InlineKeyboardButton("👥 My Accounts", callback_data="my_accounts")
-    btn_help = types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
-    markup.add(btn_add, btn_stream)
-    markup.add(btn_accounts, btn_help)
+    markup.add(
+        types.InlineKeyboardButton("📱 Add Number", callback_data="add_number"),
+        types.InlineKeyboardButton("📡 Stream", callback_data="stream")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👥 My Accounts", callback_data="my_accounts"),
+        types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
+    )
     return markup
 
 def get_cancel():
     markup = types.InlineKeyboardMarkup(row_width=1)
-    btn_cancel = types.InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-    markup.add(btn_cancel)
-    return markup
-
-def get_otp_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_resend = types.InlineKeyboardButton("🔄 Resend OTP", callback_data="resend_otp")
-    btn_cancel = types.InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-    markup.add(btn_resend, btn_cancel)
+    markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="cancel"))
     return markup
 
 def is_admin(user_id):
@@ -80,7 +73,7 @@ def is_admin(user_id):
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ <b>Unauthorized access.</b>")
+        bot.reply_to(message, "⛔ Unauthorized")
         return
     
     db["states"][str(message.from_user.id)] = "idle"
@@ -119,7 +112,6 @@ def cb_add_number(call):
 def handle_number(m):
     user_id = m.from_user.id
     phone = m.text.strip()
-    
     clean = phone.replace("+", "").replace(" ", "").replace("-", "")
     
     if not clean.isdigit() or len(clean) < 10:
@@ -133,35 +125,27 @@ def handle_number(m):
     
     def send_otp():
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # Sync Telethon - reference code jaisa
+            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            client.connect()
             
-            async def send():
-                client = TelegramClient(StringSession(), API_ID, API_HASH)
-                await client.connect()
-                result = await client.send_code_request(clean)
-                
-                # SESSION STRING bhi save karo
-                session_string = client.session.save()
-                
-                return result.phone_code_hash, session_string
+            result = client.send_code_request(clean)
             
-            phone_code_hash, session_string = loop.run_until_complete(send())
-            loop.close()
+            # Client ko alive rakho - session string save karo
+            session_string = client.session.save()
             
-            # Session string ke saath store karo
-            pending_otp_data[str(user_id)] = {
+            active_sessions[str(user_id)] = {
                 "phone": clean,
-                "code_hash": phone_code_hash,
+                "code_hash": result.phone_code_hash,
                 "session_string": session_string,
                 "timestamp": time.time()
             }
             
             bot.edit_message_text(
-                f"✅ <b>OTP sent to {clean}!</b>\n\nEnter OTP:",
+                f"✅ <b>OTP sent to {clean}!</b>\n\nEnter OTP code:",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
-                reply_markup=get_otp_keyboard()
+                reply_markup=get_cancel()
             )
             
         except Exception as e:
@@ -182,8 +166,8 @@ def handle_otp(m):
     user_id = m.from_user.id
     otp = m.text.strip()
     
-    pending = pending_otp_data.get(str(user_id))
-    if not pending:
+    session_data = active_sessions.get(str(user_id))
+    if not session_data:
         bot.reply_to(m, "❌ Session expired. Start again.", reply_markup=get_main_menu())
         db["states"][str(user_id)] = "idle"
         save_db()
@@ -193,60 +177,22 @@ def handle_otp(m):
     
     def verify_otp():
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # SESSION STRING se client banao - reference pattern
+            client = TelegramClient(
+                StringSession(session_data["session_string"]),
+                API_ID,
+                API_HASH
+            )
+            client.connect()
             
-            async def sign_in():
-                # SESSION STRING ke saath client banao - yahi fix hai
-                client = TelegramClient(
-                    StringSession(pending["session_string"]),
-                    API_ID,
-                    API_HASH
-                )
-                await client.connect()
-                
-                await client.sign_in(
-                    phone=pending["phone"],
+            try:
+                client.sign_in(
+                    phone=session_data["phone"],
                     code=otp,
-                    phone_code_hash=pending["code_hash"]
+                    phone_code_hash=session_data["code_hash"]
                 )
-                
-                session_string = client.session.save()
-                me = await client.get_me()
-                
-                if str(user_id) not in db["accounts"]:
-                    db["accounts"][str(user_id)] = []
-                
-                db["accounts"][str(user_id)].append({
-                    "phone": pending["phone"],
-                    "session": session_string,
-                    "name": me.first_name or "Unknown",
-                    "username": me.username or "",
-                    "added_at": datetime.now().isoformat()
-                })
-                
-                db["states"][str(user_id)] = "idle"
-                save_db()
-                pending_otp_data.pop(str(user_id), None)
-                await client.disconnect()
-                
-                total = len(db["accounts"][str(user_id)])
-                
-                bot.edit_message_text(
-                    f"🎉 <b>Account Added!</b>\n\n📱 {pending['phone']}\n👤 {me.first_name}\n📊 Total: {total}",
-                    chat_id=user_id,
-                    message_id=status_msg.message_id,
-                    reply_markup=get_main_menu()
-                )
-            
-            loop.run_until_complete(sign_in())
-            loop.close()
-            
-        except Exception as e:
-            logger.error(f"Verify error: {e}")
-            error_str = str(e)
-            
-            if "2FA" in error_str.upper() or "PASSWORD" in error_str.upper():
+            except SessionPasswordNeededError:
+                # 2FA needed
                 db["states"][str(user_id)] = "awaiting_2fa"
                 save_db()
                 bot.edit_message_text(
@@ -255,20 +201,45 @@ def handle_otp(m):
                     message_id=status_msg.message_id,
                     reply_markup=get_cancel()
                 )
-            elif "EXPIRED" in error_str.upper():
-                bot.edit_message_text(
-                    "❌ <b>OTP expire ho gaya!</b>\n\nResend OTP dabao.",
-                    chat_id=user_id,
-                    message_id=status_msg.message_id,
-                    reply_markup=get_otp_keyboard()
-                )
-            else:
-                bot.edit_message_text(
-                    f"❌ <b>Failed:</b>\n<code>{error_str}</code>",
-                    chat_id=user_id,
-                    message_id=status_msg.message_id,
-                    reply_markup=get_otp_keyboard()
-                )
+                client.disconnect()
+                return
+            
+            session_string = client.session.save()
+            me = client.get_me()
+            
+            if str(user_id) not in db["accounts"]:
+                db["accounts"][str(user_id)] = []
+            
+            db["accounts"][str(user_id)].append({
+                "phone": session_data["phone"],
+                "session": session_string,
+                "name": me.first_name or "Unknown",
+                "username": me.username or "",
+                "added_at": datetime.now().isoformat()
+            })
+            
+            db["states"][str(user_id)] = "idle"
+            save_db()
+            active_sessions.pop(str(user_id), None)
+            client.disconnect()
+            
+            total = len(db["accounts"][str(user_id)])
+            
+            bot.edit_message_text(
+                f"🎉 <b>Account Added!</b>\n━━━━━━━━━━━━━━━━━━━━\n\n📱 {session_data['phone']}\n👤 {me.first_name}\n📊 Total: {total}",
+                chat_id=user_id,
+                message_id=status_msg.message_id,
+                reply_markup=get_main_menu()
+            )
+            
+        except Exception as e:
+            logger.error(f"Verify error: {e}")
+            bot.edit_message_text(
+                f"❌ <b>Failed:</b>\n<code>{str(e)}</code>",
+                chat_id=user_id,
+                message_id=status_msg.message_id,
+                reply_markup=get_cancel()
+            )
     
     threading.Thread(target=verify_otp, daemon=True).start()
 
@@ -277,8 +248,8 @@ def handle_2fa(m):
     user_id = m.from_user.id
     password = m.text.strip()
     
-    pending = pending_otp_data.get(str(user_id))
-    if not pending:
+    session_data = active_sessions.get(str(user_id))
+    if not session_data:
         bot.reply_to(m, "❌ Session expired.", reply_markup=get_main_menu())
         return
     
@@ -286,46 +257,39 @@ def handle_2fa(m):
     
     def verify_2fa():
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            client = TelegramClient(
+                StringSession(session_data["session_string"]),
+                API_ID,
+                API_HASH
+            )
+            client.connect()
+            client.sign_in(password=password)
             
-            async def complete():
-                client = TelegramClient(
-                    StringSession(pending["session_string"]),
-                    API_ID,
-                    API_HASH
-                )
-                await client.connect()
-                await client.sign_in(password=password)
-                
-                session_string = client.session.save()
-                me = await client.get_me()
-                
-                if str(user_id) not in db["accounts"]:
-                    db["accounts"][str(user_id)] = []
-                
-                db["accounts"][str(user_id)].append({
-                    "phone": pending["phone"],
-                    "session": session_string,
-                    "name": me.first_name or "Unknown",
-                    "username": me.username or "",
-                    "added_at": datetime.now().isoformat()
-                })
-                
-                db["states"][str(user_id)] = "idle"
-                save_db()
-                pending_otp_data.pop(str(user_id), None)
-                await client.disconnect()
-                
-                bot.edit_message_text(
-                    f"🎉 <b>Account Added!</b>\n\n📱 {pending['phone']}\n👤 {me.first_name}",
-                    chat_id=user_id,
-                    message_id=status_msg.message_id,
-                    reply_markup=get_main_menu()
-                )
+            session_string = client.session.save()
+            me = client.get_me()
             
-            loop.run_until_complete(complete())
-            loop.close()
+            if str(user_id) not in db["accounts"]:
+                db["accounts"][str(user_id)] = []
+            
+            db["accounts"][str(user_id)].append({
+                "phone": session_data["phone"],
+                "session": session_string,
+                "name": me.first_name or "Unknown",
+                "username": me.username or "",
+                "added_at": datetime.now().isoformat()
+            })
+            
+            db["states"][str(user_id)] = "idle"
+            save_db()
+            active_sessions.pop(str(user_id), None)
+            client.disconnect()
+            
+            bot.edit_message_text(
+                f"🎉 <b>Account Added!</b>\n\n📱 {session_data['phone']}\n👤 {me.first_name}",
+                chat_id=user_id,
+                message_id=status_msg.message_id,
+                reply_markup=get_main_menu()
+            )
             
         except Exception as e:
             logger.error(f"2FA error: {e}")
@@ -337,57 +301,6 @@ def handle_2fa(m):
             )
     
     threading.Thread(target=verify_2fa, daemon=True).start()
-
-@bot.callback_query_handler(func=lambda call: call.data == "resend_otp")
-def cb_resend_otp(call):
-    user_id = call.from_user.id
-    pending = pending_otp_data.get(str(user_id))
-    
-    if not pending:
-        bot.answer_callback_query(call.id, "❌ Session expired.", show_alert=True)
-        return
-    
-    status_msg = bot.edit_message_text("⏳ <b>Resending...</b>", chat_id=user_id, message_id=call.message.message_id)
-    
-    def resend():
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            async def do_resend():
-                client = TelegramClient(
-                    StringSession(pending["session_string"]),
-                    API_ID,
-                    API_HASH
-                )
-                await client.connect()
-                result = await client.send_code_request(pending["phone"])
-                return result.phone_code_hash, client.session.save()
-            
-            new_hash, new_session = loop.run_until_complete(do_resend())
-            loop.close()
-            
-            pending["code_hash"] = new_hash
-            pending["session_string"] = new_session
-            pending["timestamp"] = time.time()
-            pending_otp_data[str(user_id)] = pending
-            
-            bot.edit_message_text(
-                f"✅ <b>New OTP sent!</b>\n\nEnter OTP:",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_otp_keyboard()
-            )
-        except Exception as e:
-            bot.edit_message_text(
-                f"❌ Failed: {str(e)}",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_main_menu()
-            )
-    
-    threading.Thread(target=resend, daemon=True).start()
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
@@ -427,29 +340,22 @@ def handle_stream(m):
         
         for i, acc in enumerate(accounts, 1):
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
-                async def join_vc():
-                    client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
-                    await client.connect()
-                    entity = await client.get_entity(channel)
-                    await client(JoinChannelRequest(entity))
-                    await asyncio.sleep(0.5)
-                    try:
-                        me = await client.get_me()
-                        await client(JoinGroupCallRequest(
-                            call=entity,
-                            params=DataJSON(data={}),
-                            muted=False,
-                            join_as=me
-                        ))
-                    except:
-                        pass
-                    await client.disconnect()
-                
-                loop.run_until_complete(join_vc())
-                loop.close()
+                client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
+                client.connect()
+                entity = client.get_entity(channel)
+                client(JoinChannelRequest(entity))
+                time.sleep(0.5)
+                try:
+                    me = client.get_me()
+                    client(JoinGroupCallRequest(
+                        call=entity,
+                        params=DataJSON(data={}),
+                        muted=False,
+                        join_as=me
+                    ))
+                except:
+                    pass
+                client.disconnect()
                 success += 1
             except:
                 failed += 1
@@ -486,7 +392,7 @@ def cb_help(call):
 @bot.callback_query_handler(func=lambda call: call.data == "cancel")
 def cb_cancel(call):
     db["states"][str(call.from_user.id)] = "idle"
-    pending_otp_data.pop(str(call.from_user.id), None)
+    active_sessions.pop(str(call.from_user.id), None)
     save_db()
     bot.edit_message_text("❌ Cancelled.", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)

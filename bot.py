@@ -8,7 +8,7 @@ from datetime import datetime
 from telebot import TeleBot, types
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.phone import JoinGroupCallRequest
 from telethon.tl.types import DataJSON
@@ -46,8 +46,6 @@ def save_db():
         json.dump(db, f, indent=2)
 
 db = load_db()
-
-# Client ko alive rakho - session ke saath
 active_sessions = {}
 
 def get_main_menu():
@@ -124,19 +122,24 @@ def handle_number(m):
     status_msg = bot.reply_to(m, "⏳ <b>Sending OTP...</b>")
     
     def send_otp():
-        try:
-            # Sync Telethon - reference code jaisa
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def do_send():
             client = TelegramClient(StringSession(), API_ID, API_HASH)
-            client.connect()
-            
-            result = client.send_code_request(clean)
-            
-            # Client ko alive rakho - session string save karo
+            await client.connect()
+            result = await client.send_code_request(clean)
             session_string = client.session.save()
+            await client.disconnect()
+            return result.phone_code_hash, session_string
+        
+        try:
+            phone_code_hash, session_string = loop.run_until_complete(do_send())
+            loop.close()
             
             active_sessions[str(user_id)] = {
                 "phone": clean,
-                "code_hash": result.phone_code_hash,
+                "code_hash": phone_code_hash,
                 "session_string": session_string,
                 "timestamp": time.time()
             }
@@ -147,7 +150,6 @@ def handle_number(m):
                 message_id=status_msg.message_id,
                 reply_markup=get_cancel()
             )
-            
         except Exception as e:
             logger.error(f"OTP error: {e}")
             bot.edit_message_text(
@@ -176,23 +178,24 @@ def handle_otp(m):
     status_msg = bot.reply_to(m, "⏳ <b>Verifying OTP...</b>")
     
     def verify_otp():
-        try:
-            # SESSION STRING se client banao - reference pattern
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def do_verify():
             client = TelegramClient(
                 StringSession(session_data["session_string"]),
                 API_ID,
                 API_HASH
             )
-            client.connect()
+            await client.connect()
             
             try:
-                client.sign_in(
+                await client.sign_in(
                     phone=session_data["phone"],
                     code=otp,
                     phone_code_hash=session_data["code_hash"]
                 )
             except SessionPasswordNeededError:
-                # 2FA needed
                 db["states"][str(user_id)] = "awaiting_2fa"
                 save_db()
                 bot.edit_message_text(
@@ -201,11 +204,11 @@ def handle_otp(m):
                     message_id=status_msg.message_id,
                     reply_markup=get_cancel()
                 )
-                client.disconnect()
-                return
+                await client.disconnect()
+                return None
             
             session_string = client.session.save()
-            me = client.get_me()
+            me = await client.get_me()
             
             if str(user_id) not in db["accounts"]:
                 db["accounts"][str(user_id)] = []
@@ -221,7 +224,7 @@ def handle_otp(m):
             db["states"][str(user_id)] = "idle"
             save_db()
             active_sessions.pop(str(user_id), None)
-            client.disconnect()
+            await client.disconnect()
             
             total = len(db["accounts"][str(user_id)])
             
@@ -232,6 +235,11 @@ def handle_otp(m):
                 reply_markup=get_main_menu()
             )
             
+            return me
+        
+        try:
+            loop.run_until_complete(do_verify())
+            loop.close()
         except Exception as e:
             logger.error(f"Verify error: {e}")
             bot.edit_message_text(
@@ -256,17 +264,20 @@ def handle_2fa(m):
     status_msg = bot.reply_to(m, "⏳ <b>Verifying...</b>")
     
     def verify_2fa():
-        try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def do_2fa():
             client = TelegramClient(
                 StringSession(session_data["session_string"]),
                 API_ID,
                 API_HASH
             )
-            client.connect()
-            client.sign_in(password=password)
+            await client.connect()
+            await client.sign_in(password=password)
             
             session_string = client.session.save()
-            me = client.get_me()
+            me = await client.get_me()
             
             if str(user_id) not in db["accounts"]:
                 db["accounts"][str(user_id)] = []
@@ -282,7 +293,7 @@ def handle_2fa(m):
             db["states"][str(user_id)] = "idle"
             save_db()
             active_sessions.pop(str(user_id), None)
-            client.disconnect()
+            await client.disconnect()
             
             bot.edit_message_text(
                 f"🎉 <b>Account Added!</b>\n\n📱 {session_data['phone']}\n👤 {me.first_name}",
@@ -290,7 +301,10 @@ def handle_2fa(m):
                 message_id=status_msg.message_id,
                 reply_markup=get_main_menu()
             )
-            
+        
+        try:
+            loop.run_until_complete(do_2fa())
+            loop.close()
         except Exception as e:
             logger.error(f"2FA error: {e}")
             bot.edit_message_text(
@@ -339,15 +353,18 @@ def handle_stream(m):
         channel = link.rstrip("/").split("/")[-1].split("?")[0]
         
         for i, acc in enumerate(accounts, 1):
-            try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def do_join():
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
-                client.connect()
-                entity = client.get_entity(channel)
-                client(JoinChannelRequest(entity))
-                time.sleep(0.5)
+                await client.connect()
+                entity = await client.get_entity(channel)
+                await client(JoinChannelRequest(entity))
+                await asyncio.sleep(0.5)
                 try:
-                    me = client.get_me()
-                    client(JoinGroupCallRequest(
+                    me = await client.get_me()
+                    await client(JoinGroupCallRequest(
                         call=entity,
                         params=DataJSON(data={}),
                         muted=False,
@@ -355,7 +372,11 @@ def handle_stream(m):
                     ))
                 except:
                     pass
-                client.disconnect()
+                await client.disconnect()
+            
+            try:
+                loop.run_until_complete(do_join())
+                loop.close()
                 success += 1
             except:
                 failed += 1

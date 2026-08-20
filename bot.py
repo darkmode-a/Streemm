@@ -14,7 +14,7 @@ from telethon.tl.types import DataJSON
 from flask import Flask
 
 BOT_TOKEN = "8920720185:AAF2sj4Rl_5XY3-Ohhc1X60G0yLYMBjSAIc"
-ADMIN_ID = 7374203179
+ADMIN_ID = 6862525056
 API_ID = 35055508
 API_HASH = "e5b9b02c6a3e789158d243fd2a0e24b4"
 

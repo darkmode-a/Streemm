@@ -176,19 +176,17 @@ def handle_number(m):
             async def send_code_request():
                 client = TelegramClient(StringSession(), API_ID, API_HASH)
                 await client.connect()
-                
-                if not await client.is_user_authorized():
-                    result = await client.send_code_request(clean)
-                    return client, result.phone_code_hash
-                return None, None
+                result = await client.send_code_request(clean)
+                session_str = client.session.save()
+                await client.disconnect()
+                return session_str, result.phone_code_hash
             
-            client, phone_code_hash = loop.run_until_complete(send_code_request())
+            session_str, phone_code_hash = loop.run_until_complete(send_code_request())
             
             active_clients[str(user_id)] = {
-                "client": client,
+                "session_string": session_str,
                 "phone": clean,
                 "code_hash": phone_code_hash,
-                "loop": loop,
                 "timestamp": time.time()
             }
             
@@ -242,16 +240,23 @@ def cb_resend_otp(call):
     
     def resend_otp():
         try:
-            client = client_data["client"]
+            session_str = client_data["session_string"]
             phone = client_data["phone"]
-            loop = client_data["loop"]
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             
             async def resend():
+                client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                await client.connect()
                 result = await client.send_code_request(phone)
-                return result.phone_code_hash
+                new_session_str = client.session.save()
+                await client.disconnect()
+                return new_session_str, result.phone_code_hash
             
-            new_code_hash = loop.run_until_complete(resend())
+            new_session_str, new_code_hash = loop.run_until_complete(resend())
             
+            client_data["session_string"] = new_session_str
             client_data["code_hash"] = new_code_hash
             client_data["timestamp"] = time.time()
             active_clients[str(user_id)] = client_data
@@ -290,41 +295,47 @@ def handle_otp(m):
     
     def verify_otp():
         try:
-            client = client_data["client"]
+            session_str = client_data["session_string"]
             phone = client_data["phone"]
             code_hash = client_data["code_hash"]
-            loop = client_data["loop"]
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             
             async def sign_in_and_save():
-                if not await client.is_user_authorized():
-                    try:
-                        await client.sign_in(
-                            phone=phone,
-                            code=otp,
-                            phone_code_hash=code_hash
+                client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                await client.connect()
+                try:
+                    await client.sign_in(
+                        phone=phone,
+                        code=otp,
+                        phone_code_hash=code_hash
+                    )
+                except Exception as e:
+                    error_str = str(e)
+                    if "2FA" in error_str.upper() or "PASSWORD" in error_str.upper():
+                        db["states"][str(user_id)] = "awaiting_2fa"
+                        save_db()
+                        bot.edit_message_text(
+                            "🔐 <b>2FA Password Required!</b>\n\nTelegram password enter karo:",
+                            chat_id=user_id,
+                            message_id=status_msg.message_id,
+                            reply_markup=get_cancel()
                         )
-                    except Exception as e:
-                        error_str = str(e)
-                        if "2FA" in error_str.upper() or "PASSWORD" in error_str.upper():
-                            db["states"][str(user_id)] = "awaiting_2fa"
-                            save_db()
-                            bot.edit_message_text(
-                                "🔐 <b>2FA Password Required!</b>\n\nTelegram password enter karo:",
-                                chat_id=user_id,
-                                message_id=status_msg.message_id,
-                                reply_markup=get_cancel()
-                            )
-                            return None
-                        elif "EXPIRED" in error_str.upper():
-                            bot.edit_message_text(
-                                "❌ <b>OTP expire ho gaya!</b>\n\nResend OTP button dabao.",
-                                chat_id=user_id,
-                                message_id=status_msg.message_id,
-                                reply_markup=get_otp_keyboard()
-                            )
-                            return None
-                        else:
-                            raise e
+                        await client.disconnect()
+                        return None
+                    elif "EXPIRED" in error_str.upper() or "PHONE_CODE_EXPIRED" in error_str.upper():
+                        bot.edit_message_text(
+                            "❌ <b>OTP expire ho gaya ya galat hai!</b>\n\nResend OTP button dabao.",
+                            chat_id=user_id,
+                            message_id=status_msg.message_id,
+                            reply_markup=get_otp_keyboard()
+                        )
+                        await client.disconnect()
+                        return None
+                    else:
+                        await client.disconnect()
+                        raise e
                 
                 session_string = client.session.save()
                 me = await client.get_me()
@@ -386,11 +397,15 @@ def handle_2fa(m):
     
     def verify_2fa():
         try:
-            client = client_data["client"]
+            session_str = client_data["session_string"]
             phone = client_data["phone"]
-            loop = client_data["loop"]
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             
             async def complete_2fa():
+                client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                await client.connect()
                 await client.sign_in(password=password)
                 session_string = client.session.save()
                 me = await client.get_me()
@@ -536,7 +551,7 @@ def cb_accounts(call):
     
     for i, acc in enumerate(accounts, 1):
         name = acc.get("name", "Unknown")
-        account_list += f"\n{i}. <code>{acc['phone']}</code> - {name}"
+        account_list += f"\n{i}. <code>{acc['phone']}</code> - name"
     
     text = f"👥 <b>Total: {len(accounts)}</b>{account_list}"
     bot.edit_message_text(text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())

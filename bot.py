@@ -267,7 +267,7 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# ========== STREAM & VOICE CHAT JOIN SYSTEM (SMART PARSER + DIRECT VC) ==========
+# ========== STREAM & VOICE CHAT JOIN SYSTEM (SMART PARSER + ROBUST DIRECT VC) ==========
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
     if not is_admin(call.from_user.id):
@@ -327,24 +327,31 @@ def handle_stream(m):
                     if full_channel and full_channel.full_chat and full_channel.full_chat.call:
                         call_obj = full_channel.full_chat.call
                         
-                        # DIRECT VC JOIN - SSRC Retry logic ke sath (3 attempts)
+                        # ROBUST DIRECT VC JOIN with SSRC / Already Joined handling
                         for retry in range(3):
                             try:
-                                await client(tl_functions.phone.JoinGroupCallRequest(
+                                result = await client(tl_functions.phone.JoinGroupCallRequest(
                                     call=call_obj,
                                     params=DataJSON(data="{}"),
                                     muted=False,
                                     join_as=me
                                 ))
-                                await client.disconnect()
-                                return True
+                                
+                                if result:
+                                    await client.disconnect()
+                                    return True
+                                    
                             except Exception as e:
-                                error_str = str(e)
-                                if "SSRC" in error_str.upper() or "RETRY" in error_str.upper():
+                                error_str = str(e).lower()
+                                if "ssrc" in error_str:
                                     await asyncio.sleep(2)
                                     continue
+                                elif "already" in error_str:
+                                    await client.disconnect()
+                                    return True
                                 else:
-                                    raise e
+                                    logger.error(f"Join error: {e}")
+                                    break
                         
                         await client.disconnect()
                         return False

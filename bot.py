@@ -51,6 +51,19 @@ def save_db():
 db = load_db()
 active_clients = {}
 
+# Dedicated Global Event Loop for Telethon
+telethon_loop = asyncio.new_event_loop()
+
+def _run_telethon_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+threading.Thread(target=_run_telethon_loop, args=(telethon_loop,), daemon=True).start()
+
+def run_async(coro):
+    future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
+    return future.result()
+
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_add = types.InlineKeyboardButton("📱 Add Number", callback_data="add_number")
@@ -170,21 +183,16 @@ def handle_number(m):
     
     def send_otp():
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
             async def send_code_request():
                 client = TelegramClient(StringSession(), API_ID, API_HASH)
                 await client.connect()
                 result = await client.send_code_request(clean)
-                session_str = client.session.save()
-                await client.disconnect()
-                return session_str, result.phone_code_hash
+                return client, result.phone_code_hash
             
-            session_str, phone_code_hash = loop.run_until_complete(send_code_request())
+            client, phone_code_hash = run_async(send_code_request())
             
             active_clients[str(user_id)] = {
-                "session_string": session_str,
+                "client": client,
                 "phone": clean,
                 "code_hash": phone_code_hash,
                 "timestamp": time.time()
@@ -240,23 +248,15 @@ def cb_resend_otp(call):
     
     def resend_otp():
         try:
-            session_str = client_data["session_string"]
+            client = client_data["client"]
             phone = client_data["phone"]
             
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
             async def resend():
-                client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-                await client.connect()
                 result = await client.send_code_request(phone)
-                new_session_str = client.session.save()
-                await client.disconnect()
-                return new_session_str, result.phone_code_hash
+                return result.phone_code_hash
             
-            new_session_str, new_code_hash = loop.run_until_complete(resend())
+            new_code_hash = run_async(resend())
             
-            client_data["session_string"] = new_session_str
             client_data["code_hash"] = new_code_hash
             client_data["timestamp"] = time.time()
             active_clients[str(user_id)] = client_data
@@ -295,16 +295,11 @@ def handle_otp(m):
     
     def verify_otp():
         try:
-            session_str = client_data["session_string"]
+            client = client_data["client"]
             phone = client_data["phone"]
             code_hash = client_data["code_hash"]
             
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
             async def sign_in_and_save():
-                client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-                await client.connect()
                 try:
                     await client.sign_in(
                         phone=phone,
@@ -322,8 +317,7 @@ def handle_otp(m):
                             message_id=status_msg.message_id,
                             reply_markup=get_cancel()
                         )
-                        await client.disconnect()
-                        return None
+                        return
                     elif "EXPIRED" in error_str.upper() or "PHONE_CODE_EXPIRED" in error_str.upper():
                         bot.edit_message_text(
                             "❌ <b>OTP expire ho gaya ya galat hai!</b>\n\nResend OTP button dabao.",
@@ -331,10 +325,8 @@ def handle_otp(m):
                             message_id=status_msg.message_id,
                             reply_markup=get_otp_keyboard()
                         )
-                        await client.disconnect()
-                        return None
+                        return
                     else:
-                        await client.disconnect()
                         raise e
                 
                 session_string = client.session.save()
@@ -366,10 +358,8 @@ def handle_otp(m):
                     message_id=status_msg.message_id,
                     reply_markup=get_main_menu()
                 )
-                
-                return me
             
-            loop.run_until_complete(sign_in_and_save())
+            run_async(sign_in_and_save())
             
         except Exception as e:
             logger.error(f"Verify error: {e}")
@@ -397,15 +387,10 @@ def handle_2fa(m):
     
     def verify_2fa():
         try:
-            session_str = client_data["session_string"]
+            client = client_data["client"]
             phone = client_data["phone"]
             
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
             async def complete_2fa():
-                client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-                await client.connect()
                 await client.sign_in(password=password)
                 session_string = client.session.save()
                 me = await client.get_me()
@@ -437,7 +422,7 @@ def handle_2fa(m):
                     reply_markup=get_main_menu()
                 )
             
-            loop.run_until_complete(complete_2fa())
+            run_async(complete_2fa())
             
         except Exception as e:
             logger.error(f"2FA error: {e}")
@@ -493,9 +478,6 @@ def handle_stream(m):
         
         for i, acc in enumerate(accounts, 1):
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                
                 async def join_vc():
                     client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
                     await client.connect()
@@ -514,7 +496,7 @@ def handle_stream(m):
                         logger.warning(f"VC error: {vc_err}")
                     await client.disconnect()
                 
-                loop.run_until_complete(join_vc())
+                run_async(join_vc())
                 success += 1
                 
                 try:
@@ -551,7 +533,7 @@ def cb_accounts(call):
     
     for i, acc in enumerate(accounts, 1):
         name = acc.get("name", "Unknown")
-        account_list += f"\n{i}. <code>{acc['phone']}</code> - name"
+        account_list += f"\n{i}. <code>{acc['phone']}</code> - {name}"
     
     text = f"👥 <b>Total: {len(accounts)}</b>{account_list}"
     bot.edit_message_text(text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())

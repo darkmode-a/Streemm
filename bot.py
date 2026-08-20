@@ -11,30 +11,30 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.phone import JoinGroupCallRequest
 from telethon.tl.types import DataJSON
+from flask import Flask
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 BOT_TOKEN = "8920720185:AAF2sj4Rl_5XY3-Ohhc1X60G0yLYMBjSAIc"
 ADMIN_ID = 7374203179
-
-# Your Telegram API credentials
 API_ID = 35055508
 API_HASH = "e5b9b02c6a3e789158d243fd2a0e24b4"
 
-# Logging
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Combo Bot is running!"
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Bot initialize
 bot = TeleBot(BOT_TOKEN, threaded=True, parse_mode="HTML")
 
-# ==========================================
-# DATABASE
-# ==========================================
 DATABASE_FILE = "combo_database.json"
 
 def load_db():
@@ -54,9 +54,6 @@ def save_db():
 db = load_db()
 active_clients = {}
 
-# ==========================================
-# KEYBOARDS
-# ==========================================
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_add = types.InlineKeyboardButton("📱 Add Number", callback_data="add_number")
@@ -76,9 +73,6 @@ def get_cancel():
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
-# ==========================================
-# COMMANDS
-# ==========================================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     if not is_admin(message.from_user.id):
@@ -109,7 +103,6 @@ def cmd_start(message):
 <i>💡 Unlimited accounts supported!</i>
 """
     bot.reply_to(message, text, reply_markup=get_main_menu(), disable_web_page_preview=True)
-    logger.info(f"Welcome sent to {message.from_user.first_name}")
 
 @bot.message_handler(commands=['help'])
 def cmd_help(message):
@@ -137,9 +130,6 @@ def cmd_help(message):
 """
     bot.reply_to(message, text, disable_web_page_preview=True)
 
-# ==========================================
-# ADD NUMBER SYSTEM
-# ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "add_number")
 def cb_add_number(call):
     if not is_admin(call.from_user.id):
@@ -182,7 +172,7 @@ def handle_number(m):
             client = TelegramClient(StringSession(), API_ID, API_HASH)
             client.connect()
             
-            result = client.send_code_request(clean)
+            result = loop.run_until_complete(client.send_code_request(clean))
             
             active_clients[str(user_id)] = {
                 "client": client,
@@ -232,10 +222,10 @@ def handle_otp(m):
             phone = client_data["phone"]
             code_hash = client_data["code_hash"]
             
-            client.sign_in(phone=phone, code=otp, phone_code_hash=code_hash)
+            loop.run_until_complete(client.sign_in(phone=phone, code=otp, phone_code_hash=code_hash))
             
             session_string = client.session.save()
-            me = client.get_me()
+            me = loop.run_until_complete(client.get_me())
             
             if str(user_id) not in db["accounts"]:
                 db["accounts"][str(user_id)] = []
@@ -272,9 +262,6 @@ def handle_otp(m):
     
     threading.Thread(target=verify_otp, daemon=True).start()
 
-# ==========================================
-# STREAM SYSTEM
-# ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
     if not is_admin(call.from_user.id):
@@ -328,18 +315,18 @@ def handle_stream(m):
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
                 client.connect()
                 
-                entity = client.get_entity(channel)
+                entity = loop.run_until_complete(client.get_entity(channel))
                 
-                client(JoinChannelRequest(entity))
+                loop.run_until_complete(client(JoinChannelRequest(entity)))
                 time.sleep(0.5)
                 
                 try:
-                    client(JoinGroupCallRequest(
+                    loop.run_until_complete(client(JoinGroupCallRequest(
                         call=entity,
                         params=DataJSON(data={}),
                         muted=False,
                         join_as=client.get_me()
-                    ))
+                    )))
                 except Exception as vc_err:
                     logger.warning(f"VC join error for {acc['phone']}: {vc_err}")
                 
@@ -371,9 +358,6 @@ def handle_stream(m):
     
     threading.Thread(target=join_stream, daemon=True).start()
 
-# ==========================================
-# MY ACCOUNTS
-# ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "my_accounts")
 def cb_accounts(call):
     if not is_admin(call.from_user.id):
@@ -404,15 +388,8 @@ def cb_accounts(call):
     )
     bot.answer_callback_query(call.id)
 
-# ==========================================
-# HELP CALLBACK
-# ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "help")
 def cb_help(call):
-    if not is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "⛔ Unauthorized", show_alert=True)
-        return
-    
     text = """
 📚 <b>How To Use</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -436,9 +413,6 @@ def cb_help(call):
     )
     bot.answer_callback_query(call.id)
 
-# ==========================================
-# CANCEL
-# ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "cancel")
 def cb_cancel(call):
     db["states"][str(call.from_user.id)] = "idle"
@@ -454,26 +428,20 @@ def cb_cancel(call):
     )
     bot.answer_callback_query(call.id)
 
-# ==========================================
-# MAIN
-# ==========================================
-def main():
-    print("""
-╔════════════════════════════════════╗
-║     COMBO BOT STARTING...          ║
-╚════════════════════════════════════╝
-    """)
-    
+def run_bot():
     logger.info("Combo Bot starting...")
-    
     try:
         bot_info = bot.get_me()
         logger.info(f"Logged in as @{bot_info.username}")
         logger.info(f"Admin: {ADMIN_ID}")
-        logger.info("Bot is now polling for updates...")
+        logger.info("Bot is now polling...")
         bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
         logger.critical(f"Critical error: {e}")
 
 if __name__ == "__main__":
-    main()
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)

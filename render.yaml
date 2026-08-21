@@ -1,6 +1,6 @@
 services:
-  - type: worker
+  - type: web
     name: combo-bot
     env: python
-    buildCommand: ""
-    startCommand: python bot.py
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn bot:app --bind 0.0.0.0:$PORT"

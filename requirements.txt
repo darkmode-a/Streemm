@@ -3,3 +3,4 @@ telethon
 cryptg
 flask
 gunicorn
+PyTgCalls

@@ -1,1 +1,6 @@
-pip install pyTelegramBotAPI telethon cryptg flask gunicorn && pip install PyTgCalls --no-deps
+services:
+  - type: web
+    name: combo-bot
+    env: python
+    buildCommand: "pip install pyTelegramBotAPI telethon cryptg flask gunicorn && pip install PyTgCalls --no-deps"
+    startCommand: "gunicorn bot:app --bind 0.0.0.0:$PORT"

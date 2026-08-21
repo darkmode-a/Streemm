@@ -8,17 +8,18 @@ import re
 import random
 from datetime import datetime
 from telebot import TeleBot, types
-from telethon import TelegramClient, functions as tl_functions
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
-from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.types import DataJSON
+from pytgcalls import PyTgCalls
+from pytgcalls.types import GroupCallConfig
 from flask import Flask
 
-BOT_TOKEN = "8920720185:AAF2sj4Rl_5XY3-Ohhc1X60G0yLYMBjSAIc"
+# Environment Variables se lo - hardcode mat karo
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8909561438:AAFPXnV4SQp1xFqsv-YjbHIUuIv_fe3oguU")
 ADMIN_ID = 7374203179
-API_ID = 35055508
-API_HASH = "e5b9b02c6a3e789158d243fd2a0e24b4"
+API_ID = int(os.environ.get("API_ID", "33135928"))
+API_HASH = os.environ.get("API_HASH", "2d05318764def4ef1e01db06d2e564b4")
 
 app = Flask(__name__)
 
@@ -37,7 +38,7 @@ def load_db():
     if os.path.exists(DATABASE_FILE):
         with open(DATABASE_FILE, 'r') as f:
             return json.load(f)
-    return {"accounts": {}, "states": {}, "pending": {}}
+    return {"accounts": {}, "states": {}}
 
 def save_db():
     with open(DATABASE_FILE, 'w') as f:
@@ -45,69 +46,17 @@ def save_db():
 
 db = load_db()
 
+# Global loop for Telethon operations
 telethon_loop = asyncio.new_event_loop()
 telethon_thread = threading.Thread(target=telethon_loop.run_forever, daemon=True)
 telethon_thread.start()
 
 active_clients = {}
+active_calls = {}  # Maintained PyTgCalls connections
 
 def run_async(coro):
     future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
     return future.result(timeout=120)
-
-# ==========================================
-# 🧠 ACCOUNT BRAIN SYSTEM
-# ==========================================
-
-class AccountBrain:
-    """Har account ko alag human-like behavior deta hai"""
-    
-    def __init__(self, account):
-        self.account = account
-        self.behavior = random.choice(["normal", "fast", "slow", "careful", "aggressive", "stealth"])
-        self.mood = random.choice(["fresh", "tired", "excited", "neutral"])
-    
-    def get_connect_delay(self):
-        """Connection se pehle kitna wait kare"""
-        if self.behavior == "normal":
-            return random.uniform(2, 5)
-        elif self.behavior == "fast":
-            return random.uniform(0.5, 2)
-        elif self.behavior == "slow":
-            return random.uniform(5, 10)
-        elif self.behavior == "careful":
-            return random.uniform(4, 7)
-        elif self.behavior == "aggressive":
-            return random.uniform(1, 3)
-        else:
-            return random.uniform(3, 8)
-    
-    def get_join_strategy(self):
-        """Alag-alag join strategies"""
-        strategies = ["direct", "wait_retry", "stealth_muted", "channel_then_vc"]
-        weights = [0.3, 0.3, 0.2, 0.2]
-        return random.choices(strategies, weights=weights)[0]
-    
-    def get_retry_count(self):
-        """Kitni baar retry kare"""
-        if self.behavior == "aggressive":
-            return 5
-        elif self.behavior == "careful":
-            return 2
-        elif self.behavior == "stealth":
-            return 3
-        else:
-            return random.randint(2, 4)
-    
-    def get_retry_delay(self):
-        """Retry ke beech kitna wait kare"""
-        return random.uniform(2, 6)
-    
-    def is_muted(self):
-        """Account muted join kare ya nahi"""
-        if self.behavior == "stealth":
-            return True
-        return random.choice([True, False])
 
 # ==========================================
 # KEYBOARDS
@@ -144,16 +93,11 @@ def cmd_start(message):
         return
     db["states"][str(message.from_user.id)] = "idle"
     save_db()
-    
-    text = (
-        "🤖 <b>Combo Bot - Advanced Brain</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📱 <b>Add Number:</b> Login accounts\n"
-        "📡 <b>Stream:</b> Smart VC Join\n"
-        "👥 <b>My Accounts:</b> View accounts\n\n"
-        "<i>🧠 Har account alag human-like behave karega!</i>"
+    bot.reply_to(
+        message,
+        "🤖 <b>Combo Bot - PyTgCalls Edition</b>\n\n📱 Add Number\n📡 Stream\n👥 My Accounts",
+        reply_markup=get_main_menu()
     )
-    bot.reply_to(message, text, reply_markup=get_main_menu())
 
 # ==========================================
 # ADD NUMBER SYSTEM
@@ -185,7 +129,6 @@ def handle_number(m):
     
     db["states"][str(user_id)] = "awaiting_otp"
     save_db()
-    
     status_msg = bot.reply_to(m, "⏳ <b>Sending OTP...</b>")
     
     def send_otp():
@@ -198,16 +141,10 @@ def handle_number(m):
                 "phone": phone,
                 "code_hash": result.phone_code_hash
             }
-            return result.phone_code_hash
         
         try:
             run_async(_send())
-            bot.edit_message_text(
-                f"✅ <b>OTP sent!</b>\n\nEnter OTP:",
-                chat_id=user_id,
-                message_id=status_msg.message_id,
-                reply_markup=get_cancel()
-            )
+            bot.edit_message_text("✅ <b>OTP sent!</b>\n\nEnter OTP:", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_cancel())
         except Exception as e:
             bot.edit_message_text(f"❌ Failed: {str(e)}", chat_id=user_id, message_id=status_msg.message_id, reply_markup=get_main_menu())
             db["states"][str(user_id)] = "idle"
@@ -218,21 +155,18 @@ def handle_number(m):
 @bot.message_handler(func=lambda m: db["states"].get(str(m.from_user.id)) == "awaiting_otp")
 def handle_otp(m):
     user_id = m.from_user.id
-    raw_text = m.text.strip()
-    
-    digits_found = re.findall(r'\d+', raw_text)
-    if not digits_found:
+    digits = re.findall(r'\d+', m.text.strip())
+    if not digits:
         bot.reply_to(m, "❌ OTP nahi mila!", reply_markup=get_cancel())
         return
-    
-    otp = "".join(digits_found)
+    otp = "".join(digits)
     
     client_data = active_clients.get(str(user_id))
     if not client_data:
         bot.reply_to(m, "❌ Session expired.", reply_markup=get_main_menu())
         return
     
-    status_msg = bot.reply_to(m, f"⏳ <b>Verifying OTP...</b>")
+    status_msg = bot.reply_to(m, "⏳ <b>Verifying...</b>")
     
     def verify_otp():
         async def _verify():
@@ -286,7 +220,6 @@ def handle_otp(m):
 def handle_2fa(m):
     user_id = m.from_user.id
     password = m.text.strip()
-    
     client_data = active_clients.get(str(user_id))
     if not client_data:
         bot.reply_to(m, "❌ Session expired.", reply_markup=get_main_menu())
@@ -298,7 +231,6 @@ def handle_2fa(m):
         async def _2fa():
             client = client_data["client"]
             await client.sign_in(password=password)
-            
             session_string = client.session.save()
             me = await client.get_me()
             
@@ -333,7 +265,7 @@ def handle_2fa(m):
     threading.Thread(target=verify_2fa, daemon=True).start()
 
 # ==========================================
-# 🧠 SMART STREAM SYSTEM (ADVANCED BRAIN)
+# STREAM - PyTgCalls SE PROPER VC JOIN
 # ==========================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
@@ -348,7 +280,7 @@ def cb_stream(call):
     db["states"][str(call.from_user.id)] = "awaiting_stream"
     save_db()
     bot.edit_message_text(
-        f"📡 <b>Send VC/Livestream Link:</b>\n\n🧠 Active Accounts: {len(accounts)}\n\n<i>Har account alag human-like strategy se join karega!</i>",
+        f"📡 <b>Send VC Link:</b>\n\nAccounts: {len(accounts)}",
         chat_id=call.from_user.id,
         message_id=call.message.message_id,
         reply_markup=get_cancel()
@@ -363,9 +295,8 @@ def handle_stream(m):
     save_db()
     accounts = db["accounts"].get(str(user_id), [])
     
-    status_msg = bot.reply_to(m, f"🧠 <b>Brain Active!</b>\n\nProcessing {len(accounts)} accounts...", reply_markup=get_main_menu())
+    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts to VC...</b>", reply_markup=get_main_menu())
     
-    # Username nikaalo
     clean_link = link.split("?")[0].rstrip("/")
     parts = [p for p in clean_link.split("/") if p and p not in ["https:", "http:", "t.me", "telegram.dog"]]
     username = parts[0].replace("@", "").strip() if parts else ""
@@ -379,144 +310,68 @@ def handle_stream(m):
         failed = 0
         
         for i, acc in enumerate(accounts, 1):
-            # Har account ke liye alag brain
-            brain = AccountBrain(acc)
-            strategy = brain.get_join_strategy()
-            
-            async def _smart_join():
+            async def _join_vc_pytgcalls():
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
-                
-                # Human-like connection delay
-                await asyncio.sleep(brain.get_connect_delay())
                 await client.connect()
                 
+                pytgcalls = PyTgCalls(client)
+                await pytgcalls.start()
+                
                 try:
-                    me = await client.get_me()
                     entity = await client.get_entity(username)
                     
-                    # Get full channel info
-                    full_channel = await client(tl_functions.channels.GetFullChannelRequest(entity))
-                    
-                    if not full_channel or not full_channel.full_chat or not full_channel.full_chat.call:
-                        await client.disconnect()
-                        return False
-                    
-                    call_obj = full_channel.full_chat.call
-                    muted = brain.is_muted()
-                    
-                    # STRATEGY: DIRECT
-                    if strategy == "direct":
-                        try:
-                            await client(tl_functions.phone.JoinGroupCallRequest(
-                                call=call_obj,
-                                params=DataJSON(data="{}"),
-                                muted=muted,
-                                join_as=me
-                            ))
-                            await client.disconnect()
-                            return True
-                        except Exception as e:
-                            if "SSRC" in str(e).upper():
-                                await asyncio.sleep(brain.get_retry_delay())
-                                await client(tl_functions.phone.JoinGroupCallRequest(
-                                    call=call_obj,
-                                    params=DataJSON(data="{}"),
-                                    muted=muted,
-                                    join_as=me
-                                ))
-                                await client.disconnect()
-                                return True
-                            raise e
-                    
-                    # STRATEGY: WAIT RETRY
-                    elif strategy == "wait_retry":
-                        for attempt in range(brain.get_retry_count()):
-                            try:
-                                await client(tl_functions.phone.JoinGroupCallRequest(
-                                    call=call_obj,
-                                    params=DataJSON(data="{}"),
-                                    muted=muted,
-                                    join_as=me
-                                ))
-                                await client.disconnect()
-                                return True
-                            except Exception as e:
-                                if "SSRC" in str(e).upper() or "RETRY" in str(e).upper():
-                                    await asyncio.sleep(brain.get_retry_delay())
-                                    continue
-                                else:
-                                    raise e
-                        await client.disconnect()
-                        return False
-                    
-                    # STRATEGY: CHANNEL THEN VC
-                    elif strategy == "channel_then_vc":
-                        try:
-                            await client(JoinChannelRequest(entity))
-                            await asyncio.sleep(random.uniform(1, 3))
-                        except:
-                            pass
-                        
-                        await client(tl_functions.phone.JoinGroupCallRequest(
-                            call=call_obj,
-                            params=DataJSON(data="{}"),
-                            muted=muted,
-                            join_as=me
-                        ))
-                        await client.disconnect()
-                        return True
-                    
-                    # DEFAULT: STEALTH MUTED
-                    else:
-                        await client(tl_functions.phone.JoinGroupCallRequest(
-                            call=call_obj,
-                            params=DataJSON(data="{}"),
+                    # PyTgCalls proper payload generate karta hai
+                    await pytgcalls.join_group_call(
+                        entity.id,
+                        config=GroupCallConfig(
                             muted=True,
-                            join_as=me
-                        ))
-                        await client.disconnect()
-                        return True
+                            video_stopped=True
+                        )
+                    )
+                    
+                    # Connection maintain - disconnect MAT karo
+                    active_calls[acc["phone"]] = {
+                        "client": client,
+                        "pytgcalls": pytgcalls,
+                        "entity": entity
+                    }
+                    
+                    return True
                     
                 except Exception as e:
-                    logger.error(f"Smart join failed for {acc['phone']} [{brain.behavior}/{strategy}]: {e}")
+                    logger.error(f"PyTgCalls join failed for {acc['phone']}: {e}")
                     try:
+                        await pytgcalls.stop()
                         await client.disconnect()
                     except:
                         pass
                     return False
             
             try:
-                joined = run_async(_smart_join())
+                joined = run_async(_join_vc_pytgcalls())
                 if joined:
                     success += 1
                 else:
                     failed += 1
-            except:
+            except Exception as e:
+                logger.error(f"Failed {acc['phone']}: {e}")
                 failed += 1
             
             try:
                 bot.edit_message_text(
-                    f"🧠 <b>Brain Processing...</b>\n\n"
-                    f"Target: <code>@{username}</code>\n"
-                    f"Account: {i}/{len(accounts)}\n"
-                    f"Behavior: <code>{brain.behavior}</code>\n"
-                    f"Strategy: <code>{strategy}</code>\n\n"
-                    f"✅ Success: {success}\n"
-                    f"❌ Failed: {failed}",
+                    f"🚀 <b>Processing...</b>\n\n✅ Success: {success}\n❌ Failed: {failed}\n\n"
+                    f"<i>Active connections: {len(active_calls)}</i>",
                     chat_id=user_id,
                     message_id=status_msg.message_id
                 )
             except:
                 pass
             
-            time.sleep(random.uniform(1, 3))
+            time.sleep(2)
         
         bot.edit_message_text(
-            f"✅ <b>Process Complete!</b>\n\n"
-            f"Target: <code>@{username}</code>\n"
-            f"✅ Success: {success}\n"
-            f"❌ Failed: {failed}\n\n"
-            f"<i>🧠 Brain ne {len(accounts)} accounts process kiye!</i>",
+            f"✅ <b>Complete!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}\n\n"
+            f"<i>Active VC connections maintained: {len(active_calls)}</i>",
             chat_id=user_id,
             message_id=status_msg.message_id,
             reply_markup=get_main_menu()
@@ -533,38 +388,24 @@ def cb_accounts(call):
     accounts = db["accounts"].get(str(call.from_user.id), [])
     account_list = ""
     for i, acc in enumerate(accounts, 1):
-        account_list += f"\n{i}. <code>+{acc['phone']}</code> - {acc.get('name', 'Unknown')}"
-    
-    text = f"👥 <b>Saved Accounts (Total: {len(accounts)})</b>\n━━━━━━━━━━━━━━━━━━━━{account_list}"
-    bot.edit_message_text(text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
+        account_list += f"\n{i}. <code>+{acc['phone']}</code>"
+    bot.edit_message_text(f"👥 Total: {len(accounts)}{account_list}", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "help")
 def cb_help(call):
-    text = (
-        "📚 <b>Bot Instructions:</b>\n\n"
-        "1️⃣ <b>Add Number</b> - Login accounts\n"
-        "2️⃣ <b>Stream</b> - Send VC link\n"
-        "3️⃣ Bot har account ko alag brain se join karega!\n\n"
-        "<i>🧠 Advanced Human-Like System</i>"
-    )
-    bot.edit_message_text(text, chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
+    bot.edit_message_text("📚 Help: Add Number, Stream, My Accounts", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel")
 def cb_cancel(call):
     db["states"][str(call.from_user.id)] = "idle"
-    active_clients.pop(str(call.from_user.id), None)
     save_db()
     bot.edit_message_text("❌ Cancelled.", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
-# ==========================================
-# MAIN
-# ==========================================
-
 def run_bot():
-    logger.info("Combo Bot with Brain starting...")
+    logger.info("Combo Bot - PyTgCalls Edition starting...")
     try:
         bot_info = bot.get_me()
         logger.info(f"Logged in as @{bot_info.username}")

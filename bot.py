@@ -5,17 +5,13 @@ import logging
 import threading
 import time
 import re
-import random
 from datetime import datetime
 from telebot import TeleBot, types
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
-from pytgcalls import PyTgCalls
-from pytgcalls.types import GroupCallConfig
 from flask import Flask
 
-# Environment Variables se lo - hardcode mat karo
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8909561438:AAFPXnV4SQp1xFqsv-YjbHIUuIv_fe3oguU")
 ADMIN_ID = 7374203179
 API_ID = int(os.environ.get("API_ID", "33135928"))
@@ -25,7 +21,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Combo Bot is running!"
+    return "Bot is running!"
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,22 +41,15 @@ def save_db():
         json.dump(db, f, indent=2)
 
 db = load_db()
+active_clients = {}
 
-# Global loop for Telethon operations
 telethon_loop = asyncio.new_event_loop()
 telethon_thread = threading.Thread(target=telethon_loop.run_forever, daemon=True)
 telethon_thread.start()
 
-active_clients = {}
-active_calls = {}  # Maintained PyTgCalls connections
-
 def run_async(coro):
     future = asyncio.run_coroutine_threadsafe(coro, telethon_loop)
-    return future.result(timeout=120)
-
-# ==========================================
-# KEYBOARDS
-# ==========================================
+    return future.result(timeout=60)
 
 def get_main_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -82,10 +71,6 @@ def get_cancel():
 def is_admin(user_id):
     return user_id == ADMIN_ID
 
-# ==========================================
-# COMMANDS
-# ==========================================
-
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     if not is_admin(message.from_user.id):
@@ -95,13 +80,9 @@ def cmd_start(message):
     save_db()
     bot.reply_to(
         message,
-        "🤖 <b>Combo Bot - PyTgCalls Edition</b>\n\n📱 Add Number\n📡 Stream\n👥 My Accounts",
+        "🤖 <b>Combo Bot</b>\n\n📱 Add Number\n📡 Stream\n👥 My Accounts",
         reply_markup=get_main_menu()
     )
-
-# ==========================================
-# ADD NUMBER SYSTEM
-# ==========================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_number")
 def cb_add_number(call):
@@ -264,10 +245,7 @@ def handle_2fa(m):
     
     threading.Thread(target=verify_2fa, daemon=True).start()
 
-# ==========================================
-# STREAM - PyTgCalls SE PROPER VC JOIN
-# ==========================================
-
+# STREAM - SIMPLE CHANNEL JOIN
 @bot.callback_query_handler(func=lambda call: call.data == "stream")
 def cb_stream(call):
     if not is_admin(call.from_user.id):
@@ -280,7 +258,7 @@ def cb_stream(call):
     db["states"][str(call.from_user.id)] = "awaiting_stream"
     save_db()
     bot.edit_message_text(
-        f"📡 <b>Send VC Link:</b>\n\nAccounts: {len(accounts)}",
+        f"📡 <b>Send Channel Link:</b>\n\nAccounts: {len(accounts)}",
         chat_id=call.from_user.id,
         message_id=call.message.message_id,
         reply_markup=get_cancel()
@@ -295,7 +273,7 @@ def handle_stream(m):
     save_db()
     accounts = db["accounts"].get(str(user_id), [])
     
-    status_msg = bot.reply_to(m, f"🚀 <b>Joining {len(accounts)} accounts to VC...</b>", reply_markup=get_main_menu())
+    status_msg = bot.reply_to(m, f"🚀 <b>Processing {len(accounts)} accounts...</b>", reply_markup=get_main_menu())
     
     clean_link = link.split("?")[0].rstrip("/")
     parts = [p for p in clean_link.split("/") if p and p not in ["https:", "http:", "t.me", "telegram.dog"]]
@@ -310,57 +288,36 @@ def handle_stream(m):
         failed = 0
         
         for i, acc in enumerate(accounts, 1):
-            async def _join_vc_pytgcalls():
+            async def _join():
+                from telethon import functions as tl_functions
+                
                 client = TelegramClient(StringSession(acc["session"]), API_ID, API_HASH)
                 await client.connect()
                 
-                pytgcalls = PyTgCalls(client)
-                await pytgcalls.start()
-                
                 try:
-                    entity = await client.get_entity(username)
-                    
-                    # PyTgCalls proper payload generate karta hai
-                    await pytgcalls.join_group_call(
-                        entity.id,
-                        config=GroupCallConfig(
-                            muted=True,
-                            video_stopped=True
-                        )
-                    )
-                    
-                    # Connection maintain - disconnect MAT karo
-                    active_calls[acc["phone"]] = {
-                        "client": client,
-                        "pytgcalls": pytgcalls,
-                        "entity": entity
-                    }
-                    
+                    await client(tl_functions.channels.JoinChannelRequest(username))
+                    await client.disconnect()
                     return True
-                    
                 except Exception as e:
-                    logger.error(f"PyTgCalls join failed for {acc['phone']}: {e}")
+                    logger.error(f"Join failed for {acc['phone']}: {e}")
                     try:
-                        await pytgcalls.stop()
                         await client.disconnect()
                     except:
                         pass
                     return False
             
             try:
-                joined = run_async(_join_vc_pytgcalls())
+                joined = run_async(_join())
                 if joined:
                     success += 1
                 else:
                     failed += 1
-            except Exception as e:
-                logger.error(f"Failed {acc['phone']}: {e}")
+            except:
                 failed += 1
             
             try:
                 bot.edit_message_text(
-                    f"🚀 <b>Processing...</b>\n\n✅ Success: {success}\n❌ Failed: {failed}\n\n"
-                    f"<i>Active connections: {len(active_calls)}</i>",
+                    f"🚀 <b>Processing...</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
                     chat_id=user_id,
                     message_id=status_msg.message_id
                 )
@@ -370,18 +327,13 @@ def handle_stream(m):
             time.sleep(2)
         
         bot.edit_message_text(
-            f"✅ <b>Complete!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}\n\n"
-            f"<i>Active VC connections maintained: {len(active_calls)}</i>",
+            f"✅ <b>Complete!</b>\n\n✅ Success: {success}\n❌ Failed: {failed}",
             chat_id=user_id,
             message_id=status_msg.message_id,
             reply_markup=get_main_menu()
         )
     
     threading.Thread(target=join_stream, daemon=True).start()
-
-# ==========================================
-# OTHER HANDLERS
-# ==========================================
 
 @bot.callback_query_handler(func=lambda call: call.data == "my_accounts")
 def cb_accounts(call):
@@ -394,7 +346,7 @@ def cb_accounts(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "help")
 def cb_help(call):
-    bot.edit_message_text("📚 Help: Add Number, Stream, My Accounts", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
+    bot.edit_message_text("📚 Help", chat_id=call.from_user.id, message_id=call.message.message_id, reply_markup=get_main_menu())
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cancel")
@@ -405,7 +357,7 @@ def cb_cancel(call):
     bot.answer_callback_query(call.id)
 
 def run_bot():
-    logger.info("Combo Bot - PyTgCalls Edition starting...")
+    logger.info("Combo Bot starting...")
     try:
         bot_info = bot.get_me()
         logger.info(f"Logged in as @{bot_info.username}")
